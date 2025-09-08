@@ -105,13 +105,24 @@ def quat_to_rpy(w: float, x: float, y: float, z: float) -> tuple[float, float, f
 
 def build_joint_ui(root, model):
     """
-    Create sliders for base orientation and all hinge/slide joints.
+    Create a tabbed UI with:
+      - List tab: existing sliders for base orientation and all hinge/slide joints
+      - Body Map tab: a simple canvas T-pose with mini controls near joints
     Returns: (joint_vars_by_id, base_vars or None, mirror_var)
     """
-    vars_by_joint = {}
-    frame = ttk.Frame(root, padding=8)
-    frame.pack(fill="both", expand=True)
+    vars_by_joint: dict[int, tk.DoubleVar] = {}
+    ranges_by_joint: dict[int, tuple[float, float]] = {}
+    names_by_joint: dict[int, str] = {}
 
+    notebook = ttk.Notebook(root)
+    notebook.pack(fill="both", expand=True)
+
+    list_frame = ttk.Frame(notebook, padding=8)
+    body_frame = ttk.Frame(notebook, padding=8)
+    notebook.add(list_frame, text="List")
+    notebook.add(body_frame, text="Body Map")
+
+    # ---- List tab ----
     row = 0
 
     # Base orientation: only if a FREE joint exists
@@ -119,27 +130,28 @@ def build_joint_ui(root, model):
     has_free = any(model.jnt_type[j_id] == 0 for j_id in range(model.njnt))
     if has_free:
         base_vars = {"roll": tk.DoubleVar(value=0.0), "pitch": tk.DoubleVar(value=0.0), "yaw": tk.DoubleVar(value=0.0)}
-        ttk.Label(frame, text="Base orientation (roll, pitch, yaw)", font=("TkDefaultFont", 11, "bold")).grid(row=row, column=0, sticky="w")
+        ttk.Label(list_frame, text="Base orientation (roll, pitch, yaw)", font=("TkDefaultFont", 11, "bold")).grid(row=row, column=0, sticky="w")
         row += 1
         for label, key in (("Roll (x)", "roll"), ("Pitch (y)", "pitch"), ("Yaw (z)", "yaw")):
-            ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w")
-            ttk.Scale(frame, from_=-math.pi, to=math.pi, variable=base_vars[key], orient="horizontal", length=280).grid(row=row, column=1, sticky="ew", padx=6, pady=2)
-            ttk.Button(frame, text="↺", width=2, command=lambda k=key: base_vars[k].set(0.0)).grid(row=row, column=2, sticky="w")
+            ttk.Label(list_frame, text=label).grid(row=row, column=0, sticky="w")
+            ttk.Scale(list_frame, from_=-math.pi, to=math.pi, variable=base_vars[key], orient="horizontal", length=280).grid(row=row, column=1, sticky="ew", padx=6, pady=2)
+            ttk.Button(list_frame, text="↺", width=2, command=lambda k=key: base_vars[k].set(0.0)).grid(row=row, column=2, sticky="w")
             row += 1
         def reset_base():
             base_vars["roll"].set(0.0)
             base_vars["pitch"].set(0.0)
             base_vars["yaw"].set(0.0)
-        ttk.Button(frame, text="Reset base", command=reset_base).grid(row=row, column=0, pady=(6, 10), sticky="w")
+        ttk.Button(list_frame, text="Reset base", command=reset_base).grid(row=row, column=0, pady=(6, 10), sticky="w")
         row += 1
 
-    ttk.Label(frame, text="Joint Sliders (hinge/slide)", font=("TkDefaultFont", 11, "bold")).grid(row=row, column=0, sticky="w")
+    ttk.Label(list_frame, text="Joint Sliders (hinge/slide)", font=("TkDefaultFont", 11, "bold")).grid(row=row, column=0, sticky="w")
     row += 1
 
-    # Mirror checkbox
+    # Mirror checkbox (shared across tabs)
     mirror_var = tk.BooleanVar(value=False)
-    ttk.Checkbutton(frame, text="Mirror left/right", variable=mirror_var).grid(row=row, column=0, sticky="w", pady=(0, 4))
+    ttk.Checkbutton(list_frame, text="Mirror left/right", variable=mirror_var).grid(row=row, column=0, sticky="w", pady=(0, 4))
     row += 1
+
     for j_id in range(model.njnt):
         jtype = model.jnt_type[j_id]
         # 0=FREE, 1=BALL, 2=SLIDE, 3=HINGE
@@ -147,30 +159,155 @@ def build_joint_ui(root, model):
             continue
 
         name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, j_id) or f"joint_{j_id}"
+        names_by_joint[j_id] = name
         # Range: if not defined, fall back to a reasonable default
         lo, hi = model.jnt_range[j_id]
         if lo == 0.0 and hi == 0.0:
             # No explicit limits in XML -> pick a symmetric range
             hi = math.radians(180.0) if jtype == 3 else 0.5  # hinge vs slide
             lo = -hi
+        ranges_by_joint[j_id] = (lo, hi)
 
         v = tk.DoubleVar(value=0.0)
         vars_by_joint[j_id] = v
 
-        ttk.Label(frame, text=name).grid(row=row, column=0, sticky="w")
-        scale = ttk.Scale(frame, from_=lo, to=hi, variable=v, orient="horizontal", length=280)
+        ttk.Label(list_frame, text=name).grid(row=row, column=0, sticky="w")
+        scale = ttk.Scale(list_frame, from_=lo, to=hi, variable=v, orient="horizontal", length=280)
         scale.grid(row=row, column=1, sticky="ew", padx=6, pady=2)
-        ttk.Button(frame, text="↺", width=2, command=lambda var=v: var.set(0.0)).grid(row=row, column=2, sticky="w")
+        ttk.Button(list_frame, text="↺", width=2, command=lambda var=v: var.set(0.0)).grid(row=row, column=2, sticky="w")
         row += 1
 
     # Reset button
     def reset_all():
         for v in vars_by_joint.values():
             v.set(0.0)
-    ttk.Button(frame, text="Reset pose", command=reset_all).grid(row=row, column=0, pady=(8,0), sticky="w")
+    ttk.Button(list_frame, text="Reset pose", command=reset_all).grid(row=row, column=0, pady=(8,0), sticky="w")
 
     # Make the second column expand
-    frame.grid_columnconfigure(1, weight=1)
+    list_frame.grid_columnconfigure(1, weight=1)
+
+    # ---- Body Map tab ----
+    canvas = tk.Canvas(body_frame, width=600, height=480, bg="white", highlightthickness=1, highlightbackground="#ddd")
+    canvas.pack(fill="both", expand=True)
+
+    # Base R/P/Y controls (outside the map)
+    if base_vars is not None:
+        base_row = ttk.Frame(body_frame)
+        base_row.pack(fill="x", padx=4, pady=(8, 4))
+        ttk.Label(base_row, text="Base orientation:").pack(side="left", padx=(0, 8))
+        ttk.Scale(base_row, from_=-math.pi, to=math.pi, variable=base_vars["roll"], orient="horizontal", length=180).pack(side="left", padx=4)
+        ttk.Label(base_row, text="R").pack(side="left")
+        ttk.Scale(base_row, from_=-math.pi, to=math.pi, variable=base_vars["pitch"], orient="horizontal", length=180).pack(side="left", padx=8)
+        ttk.Label(base_row, text="P").pack(side="left")
+        ttk.Scale(base_row, from_=-math.pi, to=math.pi, variable=base_vars["yaw"], orient="horizontal", length=180).pack(side="left", padx=8)
+        ttk.Label(base_row, text="Y").pack(side="left")
+
+    # Mirror + Reset controls (shared var)
+    ttk.Checkbutton(body_frame, text="Mirror left/right", variable=mirror_var).pack(anchor="w", pady=(6, 0))
+    ttk.Button(body_frame, text="Reset pose", command=reset_all).pack(anchor="w", pady=(4, 0))
+
+    # Keep references for dynamic layout
+    joint_widgets: dict[int, dict[str, int | ttk.Scale]] = {}
+    base_widgets: dict[str, dict[str, int | ttk.Scale]] = {}
+
+    def _layout_body(_event=None) -> None:
+        w = max(300, canvas.winfo_width())
+        h = max(260, canvas.winfo_height())
+        canvas.delete("skeleton")
+
+        cx = w // 2
+        # Proportional geometry
+        head_r = int(min(w, h) * 0.04)
+        y_head = int(h * 0.10)
+        y_arm = int(h * 0.25)
+        y_hip = int(h * 0.55)
+        y_knee = int(h * 0.75)
+        y_ankle = int(h * 0.92)
+        half_arm = int(w * 0.42)
+        hips_half = int(w * 0.12)
+        leg_dx = int(w * 0.08)
+
+        # Skeleton
+        canvas.create_oval(cx-head_r, y_head-head_r, cx+head_r, y_head+head_r, outline="#333", width=2, tags=("skeleton",))
+        canvas.create_line(cx, y_head+head_r, cx, y_hip, fill="#333", width=4, tags=("skeleton",))
+        canvas.create_line(cx-half_arm, y_arm, cx+half_arm, y_arm, fill="#333", width=4, tags=("skeleton",))
+        canvas.create_line(cx-hips_half, y_hip, cx+hips_half, y_hip, fill="#333", width=4, tags=("skeleton",))
+        canvas.create_line(cx-leg_dx, y_hip, cx-leg_dx, y_ankle, fill="#333", width=4, tags=("skeleton",))
+        canvas.create_line(cx+leg_dx, y_hip, cx+leg_dx, y_ankle, fill="#333", width=4, tags=("skeleton",))
+
+        # (No base RPY on canvas; controls live outside the map)
+
+        # Helper: compute joint anchor positions
+        def joint_pos(jname: str) -> tuple[int, int] | None:
+            side = None
+            if jname.startswith("left_"):
+                side = "left"
+                base = jname[len("left_"):]
+            elif jname.startswith("right_"):
+                side = "right"
+                base = jname[len("right_"):]
+            else:
+                base = jname
+            if base.endswith("_joint"):
+                base = base[:-len("_joint")]
+
+            def axis_offset(b: str) -> int:
+                off = int(max(12, w * 0.035))
+                if "yaw" in b:
+                    return -off
+                if "roll" in b:
+                    return off
+                return 0
+
+            if base.startswith("shoulder") and side:
+                # Shoulders near torso (innermost)
+                x = cx - int(half_arm * 0.15) if side == "left" else cx + int(half_arm * 0.15)
+                return (x + axis_offset(base), y_arm)
+            if base.startswith("elbow") and side:
+                x = cx - int(half_arm * 0.5) if side == "left" else cx + int(half_arm * 0.5)
+                return (x + axis_offset(base), int(y_arm + (y_hip - y_arm) * 0.35))
+            if base.startswith("wrist") and side:
+                x = cx - int(half_arm * 0.9) if side == "left" else cx + int(half_arm * 0.9)
+                return (x + axis_offset(base), int(y_arm + (y_hip - y_arm) * 0.55))
+
+            if base.startswith("hip") and side:
+                x = cx - leg_dx if side == "left" else cx + leg_dx
+                return (x + axis_offset(base), y_hip)
+            if base.startswith("knee") and side:
+                x = cx - leg_dx if side == "left" else cx + leg_dx
+                return (x + axis_offset(base), y_knee)
+            if base.startswith("ankle") and side:
+                x = cx - leg_dx if side == "left" else cx + leg_dx
+                return (x + axis_offset(base), y_ankle)
+            return None
+
+        # Place or move mini scales for joints
+        slider_len_v = int(max(60, h * 0.14))
+        for j_id, var in vars_by_joint.items():
+            jname = names_by_joint.get(j_id, f"joint_{j_id}")
+            pos = joint_pos(jname)
+            if pos is None:
+                # Not mapped on body view
+                continue
+            x, y = pos
+            lo, hi = ranges_by_joint[j_id]
+            if j_id not in joint_widgets:
+                s = ttk.Scale(body_frame, from_=lo, to=hi, variable=var, orient="vertical", length=slider_len_v)
+                win = canvas.create_window(x, y - slider_len_v // 2, window=s, anchor="n")
+                dot = canvas.create_oval(x-3, y-3, x+3, y+3, fill="#666", outline="", tags=("skeleton",))
+                joint_widgets[j_id] = {"scale": s, "win": win, "dot": dot}
+            else:
+                s = joint_widgets[j_id]["scale"]  # type: ignore[assignment]
+                s.configure(length=slider_len_v)
+                win = joint_widgets[j_id]["win"]  # type: ignore[assignment]
+                canvas.coords(win, x, y - slider_len_v // 2)
+                dot = joint_widgets[j_id]["dot"]  # type: ignore[assignment]
+                canvas.coords(dot, x-3, y-3, x+3, y+3)
+
+    canvas.bind("<Configure>", _layout_body)
+    # Initial layout after widgets exist
+    body_frame.after(0, _layout_body)
+
     return vars_by_joint, base_vars, mirror_var
 
 
