@@ -2,6 +2,11 @@
 
 Manual slider UI to pose the MuJoCo G1 model and save/load poses 
 
+Make sure to install cyclonedds per the [unitree_sdk2_python repo](https://github.com/unitreerobotics/unitree_sdk2_python) and export before uv sync
+```bash 
+export CYCLONEDDS_HOME=$HOME/cyclonedds/install
+```
+
 ![App screenshot](screenshot.png)
 
 ### Quick start

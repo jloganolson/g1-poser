@@ -16,8 +16,9 @@ from tkinter import ttk
 from tkinter import filedialog, messagebox, simpledialog
 
 _HERE = Path(__file__).parent
+_OUT_DIR = _HERE / "output"
 _XML = _HERE / "g1_description" / "g1.xml"
-_AUTOSAVE = _HERE / ".poses_autosave.json"
+_AUTOSAVE = _OUT_DIR / ".poses_autosave.json"
 
 
 def rpy_to_quat(roll: float, pitch: float, yaw: float) -> tuple[float, float, float, float]:
@@ -444,7 +445,7 @@ class PosesController:
 
     def export_poses(self) -> None:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        path = _HERE / f"poses_{ts}.json"
+        path = _OUT_DIR / f"poses_{ts}.json"
         try:
             self.save_to_file(path)
             messagebox.showinfo("Exported", f"Saved to {path.name}")
@@ -484,6 +485,8 @@ class PosesController:
                 for pose in self.poses
             ]
         }
+        # Ensure destination directory exists
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(serial, indent=2))
 
     def load_from_file(self, path: Path) -> None:
