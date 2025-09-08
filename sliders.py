@@ -56,6 +56,7 @@ def build_joint_ui(root, model):
         for label, key in (("Roll (x)", "roll"), ("Pitch (y)", "pitch"), ("Yaw (z)", "yaw")):
             ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w")
             ttk.Scale(frame, from_=-math.pi, to=math.pi, variable=base_vars[key], orient="horizontal", length=280).grid(row=row, column=1, sticky="ew", padx=6, pady=2)
+            ttk.Button(frame, text="↺", width=2, command=lambda k=key: base_vars[k].set(0.0)).grid(row=row, column=2, sticky="w")
             row += 1
         def reset_base():
             base_vars["roll"].set(0.0)
@@ -86,6 +87,7 @@ def build_joint_ui(root, model):
         ttk.Label(frame, text=name).grid(row=row, column=0, sticky="w")
         scale = ttk.Scale(frame, from_=lo, to=hi, variable=v, orient="horizontal", length=280)
         scale.grid(row=row, column=1, sticky="ew", padx=6, pady=2)
+        ttk.Button(frame, text="↺", width=2, command=lambda var=v: var.set(0.0)).grid(row=row, column=2, sticky="w")
         row += 1
 
     # Reset button
