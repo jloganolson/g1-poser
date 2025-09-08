@@ -1,0 +1,11 @@
+[project]
+name = "g1-poser"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "loop-rate-limiters>=1.2.0",
+    "mink>=0.0.12",
+    "mujoco>=3.3.5",
+]

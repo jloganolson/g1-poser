@@ -1,0 +1,150 @@
+<mujoco model="g1_23dof_rev_1_0">
+  <compiler angle="radian" meshdir="meshes"/>
+
+  <option iterations="3" ls_iterations="5" timestep=".002" integrator="Euler">
+    <flag eulerdamp="disable"/>
+  </option>
+
+  <default>
+    <default class="g1">
+      <geom condim="1" contype="0" conaffinity="0"/>
+
+      <joint frictionloss="0.1" damping="1"/>
+      <position inheritrange="1" kp="40"/>
+
+      <default class="hip">
+        <default class="hip_pitch">
+          <position kp="60"/>
+          <joint axis="0 1 0" range="-2.5307 2.8798" actuatorfrcrange="-88 88" armature="0.01017752004"/>
+        </default>
+        <default class="hip_roll">
+          <position kp="60"/>
+          <joint axis="1 0 0" range="-0.5236 2.9671" actuatorfrcrange="-139 139" armature="0.025101925"/>
+        </default>
+        <default class="hip_yaw">
+          <position kp="60"/>
+          <joint axis="0 0 1" range="-2.7576 2.7576" actuatorfrcrange="-88 88" armature="0.01017752004"/>
+        </default>
+      </default>
+      <default class="knee">
+        <position kp="100"/>
+        <joint axis="0 1 0" range="-0.087267 2.8798" actuatorfrcrange="-139 139" armature="0.025101925" damping="2"/>
+      </default>
+      <default class="ankle">
+        <default class="ankle_pitch">
+          <joint axis="0 1 0" range="-0.87267 0.5236" actuatorfrcrange="-50 50" armature="0.00721945"/>
+        </default>
+        <default class="ankle_roll">
+          <joint axis="1 0 0" range="-0.2618 0.2618" actuatorfrcrange="-50 50" armature="0.00721945"/>
+        </default>
+      </default>
+      <default class="waist_yaw">
+        <position kp="60"/>
+        <joint axis="0 0 1" range="-2.618 2.618" actuatorfrcrange="-88 88" armature="0.01017752004"/>
+      </default>
+      <default class="shoulder">
+        <default class="shoulder_pitch">
+          <joint axis="0 1 0" range="-3.0892 2.6704" actuatorfrcrange="-25 25" armature="0.003609725"/>
+        </default>
+        <default class="shoulder_roll">
+          <joint axis="1 0 0" actuatorfrcrange="-25 25" armature="0.003609725"/>
+        </default>
+        <default class="shoulder_yaw">
+          <joint axis="0 0 1" range="-2.618 2.618" actuatorfrcrange="-25 25" armature="0.003609725"/>
+        </default>
+      </default>
+      <default class="elbow">
+        <joint axis="0 1 0" range="-1.0472 2.0944" actuatorfrcrange="-25 25" armature="0.003609725"/>
+      </default>
+      <default class="wrist">
+        <default class="wrist_roll">
+          <joint axis="1 0 0" range="-1.97222 1.97222" actuatorfrcrange="-25 25" armature="0.003609725"/>
+        </default>
+      </default>
+
+      <default class="visual">
+        <geom group="2" type="mesh" density="0" material="silver"/>
+      </default>
+      <default class="collision">
+        <geom group="3" rgba=".2 .6 .2 .3"/>
+        <default class="foot">
+          <geom size="0.085 0.03 0.005"/>
+        </default>
+      </default>
+      <site group="5" rgba="1 0 0 1"/>
+    </default>
+  </default>
+
+  <asset>
+    <material name="silver" rgba="0.7 0.7 0.7 1"/>
+    <material name="black" rgba="0.2 0.2 0.2 1"/>
+
+    <mesh name="pelvis" file="pelvis.STL"/>
+    <mesh name="pelvis_contour_link" file="pelvis_contour_link.STL"/>
+    <mesh name="waist_yaw_link" file="waist_yaw_link_rev_1_0.STL"/>
+    <mesh name="torso_link_23dof_rev_1_0" file="torso_link_23dof_rev_1_0.STL"/>
+    <mesh name="logo_link" file="logo_link.STL"/>
+    <mesh name="head_link" file="head_link.STL"/>
+    <mesh name="right_shoulder_pitch_link" file="right_shoulder_pitch_link.STL"/>
+  </asset>
+
+  <worldbody>
+    <light name="spotlight" mode="targetbodycom" target="pelvis" pos="0 -2 4" exponent="20"/>
+    <body name="pelvis" pos="0 0 0.793" childclass="g1">
+      <camera name="track" pos="1.734 -1.135 .35" xyaxes="0.552 0.834 -0.000 -0.170 0.112 0.979" mode="trackcom"/>
+      <inertial pos="0 0 -0.07605" quat="1 0 -0.000399148 0" mass="3.813" diaginertia="0.010549 0.0093089 0.0079184"/>
+      <freejoint name="floating_base_joint"/>
+      <geom class="visual" material="black" mesh="pelvis"/>
+      <geom class="visual" mesh="pelvis_contour_link"/>
+      <site name="imu_in_pelvis" size="0.01" pos="0.04525 0 -0.08339"/>
+      <body name="waist_yaw_link">
+        <inertial pos="0.003494 0.000233 0.018034" quat="0.289697 0.591001 -0.337795 0.672821" mass="0.214"
+          diaginertia="0.000163531 0.000107714 0.000102205"/>
+        <joint name="waist_yaw_joint" class="waist_yaw"/>
+        <geom class="visual" mesh="waist_yaw_link"/>
+        <body name="torso_link" pos="-0.0039635 0 0.044">
+          <inertial pos="0.00203158 0.000339683 0.184568" quat="0.999803 -6.03319e-05 0.0198256 0.00131986"
+            mass="7.818" diaginertia="0.121847 0.109825 0.0273735"/>
+          <geom pos="0.0039635 0 -0.044" class="visual" mesh="torso_link_23dof_rev_1_0"/>
+          <geom pos="0.0039635 0 -0.044" quat="1 0 0 0" class="visual" material="black" mesh="logo_link"/>
+          <geom pos="0.0039635 0 -0.044" class="visual" material="black" mesh="head_link"/>
+          <site name="imu_in_torso" size="0.01" pos="-0.03959 -0.00224 0.14792"/>
+          <body name="right_shoulder_pitch_link" pos="0.0039563 -0.10021 0.24778"
+            quat="0.990264 -0.139201 1.38722e-05 9.86868e-05">
+            <inertial pos="0 -0.035892 -0.011628" quat="0.68225 -0.326267 0.0130458 0.654152" mass="0.718"
+              diaginertia="0.000465864 0.000432842 0.000406394"/>
+            <joint name="right_shoulder_pitch_joint" class="shoulder_pitch"/>
+            <geom class="visual" mesh="right_shoulder_pitch_link"/>
+            <geom size="0.03 0.025" pos="0 -0.04 -0.01" quat="0.707107 0 0.707107 0" type="cylinder" class="visual"/>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+
+
+  <actuator>
+    <position class="waist_yaw" name="waist_yaw_joint" joint="waist_yaw_joint"/>
+    <position class="shoulder_pitch" name="right_shoulder_pitch_joint" joint="right_shoulder_pitch_joint"/>
+  </actuator>
+
+  <sensor>
+    <gyro name="gyro_pelvis" site="imu_in_pelvis" noise="5e-4" cutoff="34.9"/>
+    <accelerometer name="accelerometer_pelvis" site="imu_in_pelvis" noise="1e-2" cutoff="157"/>
+    <velocimeter site="imu_in_pelvis" name="local_linvel_pelvis"/>
+    <frameangvel objtype="site" objname="imu_in_pelvis" name="global_angvel_pelvis"/>
+    <framelinvel objtype="site" objname="imu_in_pelvis" name="global_linvel_pelvis"/>    
+    <framezaxis objtype="site" objname="imu_in_pelvis" name="upvector_pelvis"/>
+    <framexaxis objtype="site" objname="imu_in_pelvis" name="forwardvector_pelvis"/>
+    <framequat objtype="site" objname="imu_in_pelvis" name="orientation_pelvis"/>
+    
+    <accelerometer site="imu_in_torso" name="accelerometer_torso"/>
+    <gyro site="imu_in_torso" name="gyro_torso"/>
+    <framexaxis objtype="site" objname="imu_in_torso" name="forwardvector_torso"/>
+    <framequat objtype="site" objname="imu_in_torso" name="orientation_torso"/>
+    <framelinvel objtype="site" objname="imu_in_torso" name="global_linvel_torso"/>
+    <frameangvel objtype="site" objname="imu_in_torso" name="global_angvel_torso"/>
+    <framezaxis objtype="site" objname="imu_in_torso" name="upvector_torso"/>
+    <velocimeter site="imu_in_torso" name="local_linvel_torso"/>
+  </sensor>
+</mujoco>
