@@ -1,5 +1,3 @@
-## G1 Poser (2-hour prototype)
-
 Manual slider UI to pose the MuJoCo G1 model and save/load poses 
 
 ![App screenshot](screenshot.png)
