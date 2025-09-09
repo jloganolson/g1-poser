@@ -399,7 +399,12 @@ class PosesController:
                 float(self.base_vars["pitch"].get()),
                 float(self.base_vars["yaw"].get()),
             )
-        joints = {int(j_id): float(var.get()) for j_id, var in self.joint_vars.items()}
+        # Save joints keyed by joint name (fallback to numeric id string if unnamed)
+        joints: dict[str, float] = {}
+        for j_id, var in self.joint_vars.items():
+            nm = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_JOINT, int(j_id))
+            key = nm if nm is not None else str(int(j_id))
+            joints[key] = float(var.get())
         return {"base_rpy": base_rpy, "joints": joints}
 
     def add_pose(self) -> None:
@@ -494,8 +499,21 @@ class PosesController:
         poses = []
         for item in data.get("poses", []):
             base_rpy = tuple(item.get("base_rpy")) if item.get("base_rpy") is not None else None
-            joints = {int(k): float(v) for k, v in item.get("joints", {}).items()}
-            poses.append({"base_rpy": base_rpy, "joints": joints})
+            # Accept either legacy numeric-id keys or new name keys; store as names
+            joints_by_name: dict[str, float] = {}
+            raw = item.get("joints", {}) or {}
+            for k, v in raw.items():
+                key_str = str(k)
+                name = None
+                # If key looks like an integer, map id->name
+                try:
+                    jid = int(key_str)
+                    nm = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_JOINT, jid)
+                    name = nm if nm is not None else key_str
+                except Exception:
+                    name = key_str
+                joints_by_name[name] = float(v)
+            poses.append({"base_rpy": base_rpy, "joints": joints_by_name})
         self.poses = poses
         self.refresh(select=0 if self.poses else None)
 
@@ -534,6 +552,13 @@ def main() -> None:
         nm = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, j_id)
         if nm is not None:
             joint_name_to_id[nm] = j_id
+
+    # Convenience: id -> name mapping for joints we control
+    id_to_name: dict[int, str] = {}
+    for j_id in joint_vars.keys():
+        nm = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, int(j_id))
+        if nm is not None:
+            id_to_name[int(j_id)] = nm
 
     # Bases that should invert sign when mirroring
     invert_bases = {
@@ -643,10 +668,15 @@ def main() -> None:
                     base_vars["pitch"].set(pp)
                     base_vars["yaw"].set(yy)
 
-                # Joints linear
+                # Joints linear (keys are joint names)
                 for j_id, var in joint_vars.items():
-                    s = float(start_pose["joints"].get(int(j_id), 0.0))
-                    e = float(target_pose["joints"].get(int(j_id), 0.0))
+                    nm = id_to_name.get(int(j_id))
+                    if nm is None:
+                        s = float(start_pose["joints"].get(str(int(j_id)), 0.0))
+                        e = float(target_pose["joints"].get(str(int(j_id)), 0.0))
+                    else:
+                        s = float(start_pose["joints"].get(nm, 0.0))
+                        e = float(target_pose["joints"].get(nm, 0.0))
                     var.set(s + (e - s) * t)
 
                 if t >= 1.0:
