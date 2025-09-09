@@ -66,7 +66,7 @@
         <geom group="2" type="mesh" density="0" material="silver"/>
       </default>
       <default class="collision">
-        <geom group="3" rgba=".2 .6 .2 .3"/>
+        <geom group="3" rgba=".2 .6 .2 .3" contype="1" conaffinity="1"/>
         <default class="foot">
           <geom size="0.085 0.03 0.005"/>
         </default>
@@ -212,6 +212,7 @@
           <geom pos="0.0039635 0 -0.044" class="visual" mesh="torso_link_23dof_rev_1_0"/>
           <geom pos="0.0039635 0 -0.044" quat="1 0 0 0" class="visual" material="black" mesh="logo_link"/>
           <geom pos="0.0039635 0 -0.044" class="visual" material="black" mesh="head_link"/>
+          <geom name="torso_collision_main" class="collision" type="box" pos="0.008492 -0.000006 0.134067" size="0.075135 0.107701 0.177918"/>
           <site name="imu_in_torso" size="0.01" pos="-0.03959 -0.00224 0.14792"/>
           <body name="left_shoulder_pitch_link" pos="0.0039563 0.10022 0.24778"
             quat="0.990264 0.139201 1.38722e-05 -9.86868e-05">
