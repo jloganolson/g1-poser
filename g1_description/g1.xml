@@ -14,50 +14,57 @@
 
       <default class="hip">
         <default class="hip_pitch">
-          <position kp="60"/>
+          <position kp="350" kv="5"/>
           <joint axis="0 1 0" range="-2.5307 2.8798" actuatorfrcrange="-88 88" armature="0.01017752004"/>
         </default>
         <default class="hip_roll">
-          <position kp="60"/>
+          <position kp="200" kv="5"/>
           <joint axis="1 0 0" actuatorfrcrange="-139 139" armature="0.025101925"/>
         </default>
         <default class="hip_yaw">
-          <position kp="60"/>
+          <position kp="200" kv="5"/>
           <joint axis="0 0 1" range="-2.7576 2.7576" actuatorfrcrange="-88 88" armature="0.01017752004"/>
         </default>
       </default>
       <default class="knee">
-        <position kp="100"/>
+        <position kp="300" kv="10"/>
         <joint axis="0 1 0" range="-0.087267 2.8798" actuatorfrcrange="-139 139" armature="0.025101925" damping="2"/>
       </default>
       <default class="ankle">
         <default class="ankle_pitch">
+          <position kp="300" kv="5"/>
           <joint axis="0 1 0" range="-0.87267 0.5236" actuatorfrcrange="-50 50" armature="0.00721945"/>
         </default>
         <default class="ankle_roll">
+          <position kp="150" kv="5"/>
           <joint axis="1 0 0" range="-0.2618 0.2618" actuatorfrcrange="-50 50" armature="0.00721945"/>
         </default>
       </default>
       <default class="waist_yaw">
-        <position kp="60"/>
+        <position kp="200" kv="5"/>
         <joint axis="0 0 1" range="-2.618 2.618" actuatorfrcrange="-88 88" armature="0.01017752004"/>
       </default>
       <default class="shoulder">
         <default class="shoulder_pitch">
+          <position kp="40" kv="3"/>
           <joint axis="0 1 0" range="-3.0892 2.6704" actuatorfrcrange="-25 25" armature="0.003609725"/>
         </default>
         <default class="shoulder_roll">
+          <position kp="40" kv="3"/>
           <joint axis="1 0 0" actuatorfrcrange="-25 25" armature="0.003609725"/>
         </default>
         <default class="shoulder_yaw">
+          <position kp="40" kv="3"/>
           <joint axis="0 0 1" range="-2.618 2.618" actuatorfrcrange="-25 25" armature="0.003609725"/>
         </default>
       </default>
       <default class="elbow">
+        <position kp="40" kv="3"/>
         <joint axis="0 1 0" range="-1.0472 2.0944" actuatorfrcrange="-25 25" armature="0.003609725"/>
       </default>
       <default class="wrist">
         <default class="wrist_roll">
+          <position kp="40" kv="3"/>
           <joint axis="1 0 0" range="-1.972222054 1.972222054" actuatorfrcrange="-25 25" armature="0.003609725"/>
         </default>
       </default>
