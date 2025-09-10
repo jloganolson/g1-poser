@@ -1,4 +1,5 @@
 import math
+import argparse
 import time
 import json
 from datetime import datetime
@@ -19,6 +20,7 @@ _HERE = Path(__file__).parent
 _OUT_DIR = _HERE / "output"
 _XML = _HERE / "g1_description" / "g1.xml"
 _AUTOSAVE = _OUT_DIR / ".poses_autosave.json"
+_SCENE_WITH_GROUND = _HERE / "g1_description" / "scene_torso_collision_test.xml"
 
 
 def rpy_to_quat(roll: float, pitch: float, yaw: float) -> tuple[float, float, float, float]:
@@ -519,8 +521,28 @@ class PosesController:
 
 
 def main() -> None:
-    """Manual posing with a Tkinter slider UI + MuJoCo viewer (no physics)."""
-    model = mujoco.MjModel.from_xml_path(_XML.as_posix())
+    """Manual posing with a Tkinter slider UI + MuJoCo viewer.
+
+    Toggle between:
+      - No physics (kinematic posing, current behavior)
+      - Physics with actuators holding joints (use a scene with ground plane to see contacts)
+    """
+    parser = argparse.ArgumentParser(description="G1 Joint Posing UI (toggle physics)")
+    parser.add_argument(
+        "--scene",
+        type=Path,
+        default=_SCENE_WITH_GROUND,
+        help="MuJoCo XML scene path (default includes ground plane)",
+    )
+    parser.add_argument(
+        "--start-physics",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Start with physics mode enabled",
+    )
+    args = parser.parse_args()
+
+    model = mujoco.MjModel.from_xml_path(Path(args.scene).as_posix())
     data = mujoco.MjData(model)
 
     # Optional: disable gravity if your model drops when not actuated
@@ -530,6 +552,12 @@ def main() -> None:
     root = tk.Tk()
     root.title("G1 Joint Posing")
     joint_vars, base_vars, mirror_var = build_joint_ui(root, model)
+
+    # Physics toggle UI
+    toolbar = ttk.Frame(root, padding=8)
+    toolbar.pack(fill="x")
+    physics_var = tk.BooleanVar(value=bool(args.start_physics))
+    ttk.Checkbutton(toolbar, text="Enable physics (use actuators)", variable=physics_var).pack(side="left")
 
     # Precompute qpos addresses for each joint we control.
     # For hinge/slide joints, nq = 1, so it's just a single address.
@@ -541,6 +569,14 @@ def main() -> None:
         if model.jnt_type[j_id] == 0:
             free_qpos_addr = model.jnt_qposadr[j_id]
             break
+
+    # Capture default base height (z) at startup to restore when leaving physics
+    default_base_z = {"val": 0.0}
+    try:
+        if free_qpos_addr is not None:
+            default_base_z["val"] = float(data.qpos[free_qpos_addr + 2])
+    except Exception:
+        default_base_z["val"] = 0.0
 
     # State for activation lerp
     lerp_active = {"running": False, "t0": 0.0, "duration": 0.3, "start": None, "target": None}
@@ -637,6 +673,116 @@ def main() -> None:
 
     rate = RateLimiter(frequency=60.0, warn=False)
 
+    # Build mapping from joint id -> actuator id (names are aligned in XML)
+    joint_to_actuator: dict[int, int] = {}
+    for j in range(model.njnt):
+        if model.jnt_type[j] not in (2, 3):
+            continue
+        jname = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, j)
+        if jname is None:
+            continue
+        try:
+            aid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, jname)
+        except Exception:
+            aid = -1
+        if aid != -1:
+            joint_to_actuator[int(j)] = int(aid)
+
+    # Only joints we have sliders for and actuators to control
+    controlled_joint_ids = sorted([int(j) for j in joint_vars.keys() if int(j) in joint_to_actuator])
+
+    # Reset base pose when disabling physics to avoid drifting body pose
+    def _on_physics_toggle(*_args) -> None:
+        try:
+            if physics_var.get():
+                # Enabling physics:
+                if free_qpos_addr is not None:
+                    # 1) Apply slider-defined joint values
+                    for j_id, var in joint_vars.items():
+                        adr = jpos_addr[j_id]
+                        data.qpos[adr] = float(var.get())
+
+                    # 2) Base orientation from sliders; start at origin
+                    if base_vars is not None:
+                        roll = float(base_vars["roll"].get())
+                        pitch = float(base_vars["pitch"].get())
+                        yaw = float(base_vars["yaw"].get())
+                    else:
+                        roll = pitch = yaw = 0.0
+                    qw, qx, qy, qz = rpy_to_quat(roll, pitch, yaw)
+                    data.qpos[free_qpos_addr + 0] = 0.0
+                    data.qpos[free_qpos_addr + 1] = 0.0
+                    data.qpos[free_qpos_addr + 2] = 0.0
+                    data.qpos[free_qpos_addr + 3] = qw
+                    data.qpos[free_qpos_addr + 4] = qx
+                    data.qpos[free_qpos_addr + 5] = qy
+                    data.qpos[free_qpos_addr + 6] = qz
+
+                    # 3) Forward then compute lift so nothing penetrates ground
+                    data.qvel[:] = 0.0
+                    mujoco.mj_forward(model, data)
+
+                    margin = 0.1
+                    min_bottom = float("inf")
+                    for g in range(model.ngeom):
+                        try:
+                            if int(model.geom_bodyid[g]) == 0:
+                                continue  # worldbody (e.g., ground plane)
+                            if int(model.geom_type[g]) == int(mujoco.mjtGeom.mjGEOM_PLANE):
+                                continue  # ignore planes
+                            center_z = float(data.geom_xpos[g][2])
+                            rbound = float(model.geom_rbound[g])
+                            bottom = center_z - rbound
+                            if bottom < min_bottom:
+                                min_bottom = bottom
+                        except Exception:
+                            continue
+
+                    lift = 0.0 if min_bottom == float("inf") else max(0.0, margin - min_bottom)
+                    data.qpos[free_qpos_addr + 2] = float(lift)
+                    data.qvel[:] = 0.0
+                    mujoco.mj_forward(model, data)
+                    try:
+                        print(f"[pose-tool] Physics enabled → base z set to {float(lift):.4f} m")
+                    except Exception:
+                        pass
+                else:
+                    data.qvel[:] = 0.0
+                return
+
+            # Disabling physics: snap FREE joint to slider-defined orientation and restore default startup height
+            if free_qpos_addr is not None:
+                # Set hinge/slide joints to slider targets
+                for j_id, var in joint_vars.items():
+                    adr = jpos_addr[j_id]
+                    data.qpos[adr] = float(var.get())
+
+                # Base orientation from sliders; position at origin
+                if base_vars is not None:
+                    roll = float(base_vars["roll"].get())
+                    pitch = float(base_vars["pitch"].get())
+                    yaw = float(base_vars["yaw"].get())
+                else:
+                    roll = pitch = yaw = 0.0
+                qw, qx, qy, qz = rpy_to_quat(roll, pitch, yaw)
+                data.qpos[free_qpos_addr + 0] = 0.0
+                data.qpos[free_qpos_addr + 1] = 0.0
+                data.qpos[free_qpos_addr + 2] = float(default_base_z["val"])
+                data.qpos[free_qpos_addr + 3] = qw
+                data.qpos[free_qpos_addr + 4] = qx
+                data.qpos[free_qpos_addr + 5] = qy
+                data.qpos[free_qpos_addr + 6] = qz
+                data.qvel[:] = 0.0
+                mujoco.mj_forward(model, data)
+                try:
+                    print(f"[pose-tool] Physics disabled → base z restored to startup {float(default_base_z['val']):.4f} m")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    physics_var.trace_add("write", _on_physics_toggle)
+
     with mujoco.viewer.launch_passive(
         model=model, data=data, show_left_ui=False, show_right_ui=False
     ) as viewer:
@@ -682,25 +828,35 @@ def main() -> None:
                 if t >= 1.0:
                     lerp_active["running"] = False
 
-            # 3) Update base orientation quaternion from RPY sliders
-            if base_vars is not None and free_qpos_addr is not None:
-                roll = float(base_vars["roll"].get())
-                pitch = float(base_vars["pitch"].get())
-                yaw = float(base_vars["yaw"].get())
-                qw, qx, qy, qz = rpy_to_quat(roll, pitch, yaw)
-                # Layout: [x, y, z, qw, qx, qy, qz]
-                data.qpos[free_qpos_addr + 3] = qw
-                data.qpos[free_qpos_addr + 4] = qx
-                data.qpos[free_qpos_addr + 5] = qy
-                data.qpos[free_qpos_addr + 6] = qz
+            physics_on = bool(physics_var.get())
 
-            # 4) Read hinge/slide slider values into qpos
-            for j_id, var in joint_vars.items():
-                adr = jpos_addr[j_id]
-                data.qpos[adr] = var.get()
+            if not physics_on:
+                # 3) Update base orientation quaternion from RPY sliders (kinematic mode)
+                if base_vars is not None and free_qpos_addr is not None:
+                    roll = float(base_vars["roll"].get())
+                    pitch = float(base_vars["pitch"].get())
+                    yaw = float(base_vars["yaw"].get())
+                    qw, qx, qy, qz = rpy_to_quat(roll, pitch, yaw)
+                    # Layout: [x, y, z, qw, qx, qy, qz]
+                    data.qpos[free_qpos_addr + 3] = qw
+                    data.qpos[free_qpos_addr + 4] = qx
+                    data.qpos[free_qpos_addr + 5] = qy
+                    data.qpos[free_qpos_addr + 6] = qz
 
-            # 5) Recompute kinematics and redraw
-            mujoco.mj_forward(model, data)
+                # 4) Read hinge/slide slider values into qpos
+                for j_id, var in joint_vars.items():
+                    adr = jpos_addr[j_id]
+                    data.qpos[adr] = var.get()
+
+                # 5) Recompute kinematics and redraw
+                mujoco.mj_forward(model, data)
+            else:
+                # Physics mode: drive actuators toward slider targets and step physics
+                for j in controlled_joint_ids:
+                    aid = joint_to_actuator[j]
+                    data.ctrl[aid] = float(joint_vars[j].get())
+
+                mujoco.mj_step(model, data)
             viewer.sync()
 
             rate.sleep()
