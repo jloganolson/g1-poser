@@ -11,7 +11,7 @@ from tkinter import ttk
 
 
 # Hardcoded poses JSON path (no CLI argument)
-POSES_JSON_PATH: Path = Path("output/test.json")
+POSES_JSON_PATH: Path = Path("output-example.json")
 
 # Optional: start from a specific pose in the JSON (1-based index). Set to None to disable.
 START_POSE_INDEX: int | None = 2  # e.g., set to 1 to start at "Pose 1"
