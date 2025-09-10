@@ -245,7 +245,8 @@
                   <joint name="left_elbow_joint" class="elbow"/>
                   <geom class="visual" mesh="left_elbow_link"/>
                   <body name="left_wrist_roll_rubber_hand" pos="0.1 0.00188791 -0.01">
-                    <inertial pos="0.107947 0.00163512 0.00202245" quat="0.494051 0.504265 0.48416 0.516933" mass="0.356929" diaginertia="0.00200292 0.0019426 0.000195232"/>
+                    <!-- <inertial pos="0.107947 0.00163512 0.00202245" quat="0.494051 0.504265 0.48416 0.516933" mass="0.356929" diaginertia="0.00200292 0.0019426 0.000195232"/> -->
+                    <inertial pos="0.111202 -7.2e-05 0.000102" mass="0.106" fullinertia="5.02585e-05 0.000444834 0.000444931 -7.91587e-07 1.13798e-06 -1.20104e-07"  />
                     <joint name="left_wrist_roll_joint" class="wrist_roll"/>
                     <geom class="visual" mesh="forearm"/>
                     <site name="left_palm" pos="0.08 0 0" size="0.01"/>
@@ -279,7 +280,8 @@
                   <joint name="right_elbow_joint" class="elbow"/>
                   <geom class="visual" mesh="right_elbow_link"/>
                   <body name="right_wrist_roll_rubber_hand" pos="0.1 -0.00188791 -0.01">
-                    <inertial pos="0.107947 -0.00163512 0.00202245" quat="0.516933 0.48416 0.504265 0.494051" mass="0.356929" diaginertia="0.00200292 0.0019426 0.000195232"/>
+                    <!-- <inertial pos="0.107947 -0.00163512 0.00202245" quat="0.516933 0.48416 0.504265 0.494051" mass="0.356929" diaginertia="0.00200292 0.0019426 0.000195232"/> -->
+                    <inertial pos="0.111202 -7.2e-05 0.000102" mass="0.106" fullinertia="5.02585e-05 0.000444834 0.000444931 -7.91587e-07 1.13798e-06 -1.20104e-07"  />
                     <joint name="right_wrist_roll_joint" class="wrist_roll"/>
                     <geom class="visual" mesh="forearm"/>
                     <site name="right_palm" pos="0.08 0 0" size="0.01"/>
