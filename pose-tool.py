@@ -570,6 +570,16 @@ def main() -> None:
             free_qpos_addr = model.jnt_qposadr[j_id]
             break
 
+    # Determine a base body id (first child of world; fallback to 1 if exists)
+    base_body_id: int = 1 if model.nbody > 1 else 0
+    for b in range(1, model.nbody):
+        try:
+            if int(model.body_parentid[b]) == 0:
+                base_body_id = int(b)
+                break
+        except Exception:
+            pass
+
     # Capture default base height (z) at startup to restore when leaving physics
     default_base_z = {"val": 0.0}
     try:
@@ -577,6 +587,42 @@ def main() -> None:
             default_base_z["val"] = float(data.qpos[free_qpos_addr + 2])
     except Exception:
         default_base_z["val"] = 0.0
+
+    # One-time base pose print at startup (after initial forward)
+    try:
+        mujoco.mj_forward(model, data)
+        if free_qpos_addr is not None:
+            bx, by, bz = (
+                float(data.qpos[free_qpos_addr + 0]),
+                float(data.qpos[free_qpos_addr + 1]),
+                float(data.qpos[free_qpos_addr + 2]),
+            )
+            bqw, bqx, bqy, bqz = (
+                float(data.qpos[free_qpos_addr + 3]),
+                float(data.qpos[free_qpos_addr + 4]),
+                float(data.qpos[free_qpos_addr + 5]),
+                float(data.qpos[free_qpos_addr + 6]),
+            )
+        else:
+            bx, by, bz = (
+                float(data.xpos[base_body_id][0]),
+                float(data.xpos[base_body_id][1]),
+                float(data.xpos[base_body_id][2]),
+            )
+            bqw, bqx, bqy, bqz = (
+                float(data.xquat[base_body_id][0]),
+                float(data.xquat[base_body_id][1]),
+                float(data.xquat[base_body_id][2]),
+                float(data.xquat[base_body_id][3]),
+            )
+        rr, pp, yy = quat_to_rpy(bqw, bqx, bqy, bqz)
+        print(
+            f"[pose-tool] Startup base pos: [{bx:.6f}, {by:.6f}, {bz:.6f}] "
+            f"quat: [{bqw:.6f}, {bqx:.6f}, {bqy:.6f}, {bqz:.6f}] "
+            f"rpy(rad): [{rr:.6f}, {pp:.6f}, {yy:.6f}]"
+        )
+    except Exception:
+        pass
 
     # State for activation lerp
     lerp_active = {"running": False, "t0": 0.0, "duration": 0.3, "start": None, "target": None}
@@ -783,6 +829,9 @@ def main() -> None:
 
     physics_var.trace_add("write", _on_physics_toggle)
 
+    # Timer for periodic base pose logging while physics is on
+    _last_physics_print = {"t": time.time()}
+
     with mujoco.viewer.launch_passive(
         model=model, data=data, show_left_ui=False, show_right_ui=False
     ) as viewer:
@@ -857,6 +906,43 @@ def main() -> None:
                     data.ctrl[aid] = float(joint_vars[j].get())
 
                 mujoco.mj_step(model, data)
+                # Periodic base pose print (1 Hz) while physics is on
+                try:
+                    now = time.time()
+                    if now - _last_physics_print["t"] >= 1.0:
+                        if free_qpos_addr is not None:
+                            bx, by, bz = (
+                                float(data.qpos[free_qpos_addr + 0]),
+                                float(data.qpos[free_qpos_addr + 1]),
+                                float(data.qpos[free_qpos_addr + 2]),
+                            )
+                            bqw, bqx, bqy, bqz = (
+                                float(data.qpos[free_qpos_addr + 3]),
+                                float(data.qpos[free_qpos_addr + 4]),
+                                float(data.qpos[free_qpos_addr + 5]),
+                                float(data.qpos[free_qpos_addr + 6]),
+                            )
+                        else:
+                            bx, by, bz = (
+                                float(data.xpos[base_body_id][0]),
+                                float(data.xpos[base_body_id][1]),
+                                float(data.xpos[base_body_id][2]),
+                            )
+                            bqw, bqx, bqy, bqz = (
+                                float(data.xquat[base_body_id][0]),
+                                float(data.xquat[base_body_id][1]),
+                                float(data.xquat[base_body_id][2]),
+                                float(data.xquat[base_body_id][3]),
+                            )
+                        rr, pp, yy = quat_to_rpy(bqw, bqx, bqy, bqz)
+                        print(
+                            f"[pose-tool] Physics base pos: [{bx:.6f}, {by:.6f}, {bz:.6f}] "
+                            f"quat: [{bqw:.6f}, {bqx:.6f}, {bqy:.6f}, {bqz:.6f}] "
+                            f"rpy(rad): [{rr:.6f}, {pp:.6f}, {yy:.6f}]"
+                        )
+                        _last_physics_print["t"] = now
+                except Exception:
+                    pass
             viewer.sync()
 
             rate.sleep()
