@@ -249,7 +249,7 @@
                     <joint name="left_wrist_roll_joint" class="wrist_roll"/>
                     <geom class="visual" mesh="forearm"/>
                     <site name="left_palm" pos="0.08 0 0" size="0.01"/>
-                    <geom name="left_hand_collision" class="collision" type="sphere" size="0.02" pos="0.16 0 0" rgba=".2 .6 .2 .2"/>
+                    <geom name="left_hand_collision" class="collision" type="sphere" size="0.02" pos="0.18 0 0" rgba=".2 .6 .2 .2"/>
                   </body>
                 </body>
               </body>
@@ -283,7 +283,7 @@
                     <joint name="right_wrist_roll_joint" class="wrist_roll"/>
                     <geom class="visual" mesh="forearm"/>
                     <site name="right_palm" pos="0.08 0 0" size="0.01"/>
-                    <geom name="right_hand_collision" class="collision" type="sphere" size="0.02" pos="0.16 0 0" rgba=".2 .6 .2 .2"/>
+                    <geom name="right_hand_collision" class="collision" type="sphere" size="0.02" pos="0.18 0 0" rgba=".2 .6 .2 .2"/>
                   </body>
                 </body>
               </body>
