@@ -129,6 +129,45 @@ if __name__ == "__main__":
         posture_task := mink.PostureTask(model, cost=1e-1),
     ]
 
+    # Encourage knees and elbows to stay "up" by stabilizing their link orientations.
+    # These orientation tasks bias the solver away from pitching the segments downward
+    # when hands/feet are moved around.
+    left_knee_orientation_task = mink.FrameTask(
+        frame_name="left_knee_link",
+        frame_type="body",
+        position_cost=0.0,
+        orientation_cost=0.8,
+        lm_damping=1.0,
+    )
+    right_knee_orientation_task = mink.FrameTask(
+        frame_name="right_knee_link",
+        frame_type="body",
+        position_cost=0.0,
+        orientation_cost=0.8,
+        lm_damping=1.0,
+    )
+    left_elbow_orientation_task = mink.FrameTask(
+        frame_name="left_elbow_link",
+        frame_type="body",
+        position_cost=0.0,
+        orientation_cost=1.2,
+        lm_damping=1.0,
+    )
+    right_elbow_orientation_task = mink.FrameTask(
+        frame_name="right_elbow_link",
+        frame_type="body",
+        position_cost=0.0,
+        orientation_cost=1.2,
+        lm_damping=1.0,
+    )
+
+    tasks.extend([
+        left_knee_orientation_task,
+        right_knee_orientation_task,
+        left_elbow_orientation_task,
+        right_elbow_orientation_task,
+    ])
+
     # Task: right hand follows mocap target's position (ignore orientation)
     right_hand_task = mink.FrameTask(
         frame_name="right_palm",
@@ -165,6 +204,23 @@ if __name__ == "__main__":
         lm_damping=1.0,
     )
     tasks.extend([left_foot_task, right_foot_task])
+
+    # Keep feet flat relative to the ground by stabilizing ankle link orientations
+    left_foot_orientation_task = mink.FrameTask(
+        frame_name="left_ankle_roll_link",
+        frame_type="body",
+        position_cost=0.0,
+        orientation_cost=2.0,
+        lm_damping=1.0,
+    )
+    right_foot_orientation_task = mink.FrameTask(
+        frame_name="right_ankle_roll_link",
+        frame_type="body",
+        position_cost=0.0,
+        orientation_cost=2.0,
+        lm_damping=1.0,
+    )
+    tasks.extend([left_foot_orientation_task, right_foot_orientation_task])
 
     limits = [mink.ConfigurationLimit(model)]
 
@@ -333,6 +389,12 @@ if __name__ == "__main__":
         pelvis_orientation_task.set_target_from_configuration(configuration)
         pelvis_position_task.set_target_from_configuration(configuration)
         torso_orientation_task.set_target_from_configuration(configuration)
+        left_foot_orientation_task.set_target_from_configuration(configuration)
+        right_foot_orientation_task.set_target_from_configuration(configuration)
+        left_knee_orientation_task.set_target_from_configuration(configuration)
+        right_knee_orientation_task.set_target_from_configuration(configuration)
+        left_elbow_orientation_task.set_target_from_configuration(configuration)
+        right_elbow_orientation_task.set_target_from_configuration(configuration)
 
         rate = RateLimiter(frequency=200.0, warn=False)
         while viewer.is_running():
