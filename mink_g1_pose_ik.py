@@ -239,12 +239,28 @@ if __name__ == "__main__":
     mink.move_mocap_to_frame(model, data, "left_foot_target", "left_foot", "site")
     mink.move_mocap_to_frame(model, data, "right_foot_target", "right_foot", "site")
 
-    # --- Tk UI: XY pads and Z sliders for mocap targets ---
-    class XYPad(ttk.Frame):
-        def __init__(self, parent: tk.Misc, x_var: tk.DoubleVar, y_var: tk.DoubleVar, x_center: float, y_center: float, x_half_range: float, y_half_range: float, width: int = 200, height: int = 200, title: str | None = None) -> None:
+    # --- Tk UI: Dual XY pads per leg and gait controls ---
+    class DualXYPad(ttk.Frame):
+        def __init__(
+            self,
+            parent: tk.Misc,
+            plant_x: tk.DoubleVar,
+            plant_y: tk.DoubleVar,
+            lift_x: tk.DoubleVar,
+            lift_y: tk.DoubleVar,
+            x_center: float,
+            y_center: float,
+            x_half_range: float,
+            y_half_range: float,
+            width: int = 200,
+            height: int = 200,
+            title: str | None = None,
+        ) -> None:
             super().__init__(parent, padding=4)
-            self.x_var = x_var
-            self.y_var = y_var
+            self.plant_x = plant_x
+            self.plant_y = plant_y
+            self.lift_x = lift_x
+            self.lift_y = lift_y
             self.x_center = float(x_center)
             self.y_center = float(y_center)
             self.x_half = float(x_half_range)
@@ -263,26 +279,21 @@ if __name__ == "__main__":
             self.canvas.create_line(self.w // 2, 0, self.w // 2, self.h, fill="#eee")
             self.canvas.create_line(0, self.h // 2, self.w, self.h // 2, fill="#eee")
 
-            self.handle = self.canvas.create_oval(0, 0, 0, 0, fill="#3a7", outline="", tags=("handle",))
-            self._dragging = False
+            # Handles: plant (green), lift (orange)
+            self.handle_plant = self.canvas.create_oval(0, 0, 0, 0, fill="#3a7", outline="", tags=("plant",))
+            self.handle_lift = self.canvas.create_oval(0, 0, 0, 0, fill="#e38", outline="", tags=("lift",))
+            self._active: str | None = None
 
             def _to_canvas_coords(x_world: float, y_world: float) -> tuple[float, float]:
-                # Canvas X controls world Y (left/right relative to body center)
-                # Canvas Y controls world X (forward/back relative to body center)
                 u_y = (y_world - self.y_center) / self.y_half
                 v_x = (x_world - self.x_center) / self.x_half
-                # Left on canvas → larger +Y (left of body): negate u_y
                 cx = (-u_y * 0.5 + 0.5) * self.w
-                # Up on canvas → larger +X (forward): negate v_x
                 cy = (-v_x * 0.5 + 0.5) * self.h
                 return cx, cy
 
             def _to_world_coords(cx: float, cy: float) -> tuple[float, float]:
-                # u: + to the right on canvas; left is negative
-                # v: + downward on canvas; up is negative
                 u = (cx / self.w - 0.5) * 2.0
                 v = (cy / self.h - 0.5) * 2.0
-                # Left on canvas (u<0) → +Y (left), Up on canvas (v<0) → +X (forward)
                 xw = self.x_center - max(-1.0, min(1.0, v)) * self.x_half
                 yw = self.y_center - max(-1.0, min(1.0, u)) * self.y_half
                 return xw, yw
@@ -290,68 +301,153 @@ if __name__ == "__main__":
             self._to_canvas_coords = _to_canvas_coords  # type: ignore[attr-defined]
             self._to_world_coords = _to_world_coords    # type: ignore[attr-defined]
 
-            def _redraw_handle(*_args) -> None:
-                cx, cy = self._to_canvas_coords(float(self.x_var.get()), float(self.y_var.get()))
+            def _redraw_handles(*_args) -> None:
                 r = 6
-                self.canvas.coords(self.handle, cx - r, cy - r, cx + r, cy + r)
+                cx, cy = self._to_canvas_coords(float(self.plant_x.get()), float(self.plant_y.get()))
+                self.canvas.coords(self.handle_plant, cx - r, cy - r, cx + r, cy + r)
+                cx2, cy2 = self._to_canvas_coords(float(self.lift_x.get()), float(self.lift_y.get()))
+                self.canvas.coords(self.handle_lift, cx2 - r, cy2 - r, cx2 + r, cy2 + r)
+                # Optional: draw line between them
+                self.canvas.delete("line")
+                self.canvas.create_line(cx, cy, cx2, cy2, fill="#bbb", dash=(2, 2), tags=("line",))
+
+            def _which_handle(cx: float, cy: float) -> str:
+                p_cx, p_cy = self._to_canvas_coords(float(self.plant_x.get()), float(self.plant_y.get()))
+                l_cx, l_cy = self._to_canvas_coords(float(self.lift_x.get()), float(self.lift_y.get()))
+                dp = (p_cx - cx) * (p_cx - cx) + (p_cy - cy) * (p_cy - cy)
+                dl = (l_cx - cx) * (l_cx - cx) + (l_cy - cy) * (l_cy - cy)
+                return "plant" if dp <= dl else "lift"
 
             def _on_press(evt) -> None:  # type: ignore[no-redef]
-                self._dragging = True
+                cx = max(0, min(self.w, evt.x))
+                cy = max(0, min(self.h, evt.y))
+                # Choose active handle based on proximity unless clicking inside a tagged handle
+                items = self.canvas.find_withtag("current")
+                if items and items[0] == self.handle_plant:
+                    self._active = "plant"
+                elif items and items[0] == self.handle_lift:
+                    self._active = "lift"
+                else:
+                    self._active = _which_handle(cx, cy)
                 _on_drag(evt)
 
             def _on_drag(evt) -> None:  # type: ignore[no-redef]
-                if not self._dragging:
+                if not self._active:
                     return
                 cx = max(0, min(self.w, evt.x))
                 cy = max(0, min(self.h, evt.y))
                 xw, yw = self._to_world_coords(cx, cy)
-                self.x_var.set(xw)
-                self.y_var.set(yw)
+                if self._active == "plant":
+                    self.plant_x.set(xw)
+                    self.plant_y.set(yw)
+                else:
+                    self.lift_x.set(xw)
+                    self.lift_y.set(yw)
 
             def _on_release(_evt) -> None:
-                self._dragging = False
+                self._active = None
 
             self.canvas.bind("<Button-1>", _on_press)
             self.canvas.bind("<B1-Motion>", _on_drag)
             self.canvas.bind("<ButtonRelease-1>", _on_release)
 
-            self.x_var.trace_add("write", _redraw_handle)
-            self.y_var.trace_add("write", _redraw_handle)
-            _redraw_handle()
+            self.plant_x.trace_add("write", _redraw_handles)
+            self.plant_y.trace_add("write", _redraw_handles)
+            self.lift_x.trace_add("write", _redraw_handles)
+            self.lift_y.trace_add("write", _redraw_handles)
+            _redraw_handles()
 
-    class TargetControl(ttk.LabelFrame):
-        def __init__(self, parent: tk.Misc, label: str, init_xyz: tuple[float, float, float], vrange_xy: tuple[float, float] = (0.6, 0.6), z_span: float = 0.7) -> None:
+    class LegControl(ttk.LabelFrame):
+        def __init__(self, parent: tk.Misc, label: str, init_xyz: tuple[float, float, float], vrange_xy: tuple[float, float] = (0.6, 0.6), default_step_forward: float = 0.15) -> None:
             super().__init__(parent, text=label, padding=6)
             ix, iy, iz = init_xyz
-            self.x = tk.DoubleVar(value=float(ix))
-            self.y = tk.DoubleVar(value=float(iy))
-            self.z = tk.DoubleVar(value=float(iz))
-            self.z_min = float(iz)
-            self.z_max = float(iz + z_span)
+            self.base_z = float(iz)
+            # Two endpoints on ground (plant and lift)
+            self.plant_x = tk.DoubleVar(value=float(ix))
+            self.plant_y = tk.DoubleVar(value=float(iy))
+            self.lift_x = tk.DoubleVar(value=float(ix + default_step_forward))
+            self.lift_y = tk.DoubleVar(value=float(iy))
+            # Lift height slider
+            self.lift_h = tk.DoubleVar(value=0.08)
 
-            pad = XYPad(self, self.x, self.y, x_center=float(ix), y_center=float(iy), x_half_range=float(vrange_xy[0]), y_half_range=float(vrange_xy[1]), width=200, height=200)
+            pad = DualXYPad(
+                self,
+                self.plant_x,
+                self.plant_y,
+                self.lift_x,
+                self.lift_y,
+                x_center=float(ix),
+                y_center=float(iy),
+                x_half_range=float(vrange_xy[0]),
+                y_half_range=float(vrange_xy[1]),
+                width=200,
+                height=200,
+            )
             pad.grid(row=0, column=0, rowspan=3, sticky="nsew", padx=(0, 8))
 
-            ttk.Label(self, text="Z (m)").grid(row=0, column=1, sticky="w")
-            # Invert so top is max height
-            z_scale = ttk.Scale(self, from_=self.z_max, to=self.z_min, variable=self.z, orient="vertical", length=160)
-            z_scale.grid(row=1, column=1, sticky="nsw")
-            self.z_readout = ttk.Label(self, text=f"{float(self.z.get()):.3f}")
-            self.z_readout.grid(row=2, column=1, sticky="w")
+            ttk.Label(self, text="Lift height (m)").grid(row=0, column=1, sticky="w")
+            lift_scale = ttk.Scale(self, from_=0.0, to=0.3, variable=self.lift_h, orient="vertical", length=160)
+            lift_scale.grid(row=1, column=1, sticky="nsw")
+            self.lift_readout = ttk.Label(self, text=f"{float(self.lift_h.get()):.3f}")
+            self.lift_readout.grid(row=2, column=1, sticky="w")
 
             def _update_readout(*_a):
-                self.z_readout.configure(text=f"{float(self.z.get()):.3f}")
+                self.lift_readout.configure(text=f"{float(self.lift_h.get()):.3f}")
 
-            self.z.trace_add("write", _update_readout)
-
+            self.lift_h.trace_add("write", _update_readout)
             self.grid_columnconfigure(0, weight=1)
 
-        def get_xyz(self) -> tuple[float, float, float]:
-            return float(self.x.get()), float(self.y.get()), float(self.z.get())
+        def get_endpoints(self) -> tuple[tuple[float, float], tuple[float, float]]:
+            return (
+                (float(self.plant_x.get()), float(self.plant_y.get())),
+                (float(self.lift_x.get()), float(self.lift_y.get())),
+            )
+
+        def get_lift_height(self) -> float:
+            return float(self.lift_h.get())
+
+    class GlobalGaitControls(ttk.LabelFrame):
+        def __init__(self, parent: tk.Misc) -> None:
+            super().__init__(parent, text="Gait", padding=6)
+            self.cycle_T = tk.DoubleVar(value=1.2)
+            self.phase_gap = tk.DoubleVar(value=0.25)  # fraction of cycle between legs
+            self.duty = tk.DoubleVar(value=0.7)        # stance fraction
+            self.running = tk.BooleanVar(value=True)
+
+            # Layout sliders and readouts
+            row = 0
+            ttk.Label(self, text="Cycle (s)").grid(row=row, column=0, sticky="w")
+            ttk.Scale(self, from_=0.2, to=5.0, variable=self.cycle_T, orient="horizontal", length=160).grid(row=row, column=1, sticky="ew", padx=(6, 0))
+            self._cycle_lbl = ttk.Label(self, text=f"{float(self.cycle_T.get()):.2f}")
+            self._cycle_lbl.grid(row=row, column=2, sticky="w")
+            row += 1
+
+            ttk.Label(self, text="Phase gap").grid(row=row, column=0, sticky="w")
+            ttk.Scale(self, from_=0.0, to=0.5, variable=self.phase_gap, orient="horizontal", length=160).grid(row=row, column=1, sticky="ew", padx=(6, 0))
+            self._gap_lbl = ttk.Label(self, text=f"{float(self.phase_gap.get()):.2f}")
+            self._gap_lbl.grid(row=row, column=2, sticky="w")
+            row += 1
+
+            ttk.Label(self, text="Duty").grid(row=row, column=0, sticky="w")
+            ttk.Scale(self, from_=0.5, to=0.95, variable=self.duty, orient="horizontal", length=160).grid(row=row, column=1, sticky="ew", padx=(6, 0))
+            self._duty_lbl = ttk.Label(self, text=f"{float(self.duty.get()):.2f}")
+            self._duty_lbl.grid(row=row, column=2, sticky="w")
+            row += 1
+
+            ttk.Checkbutton(self, text="Run", variable=self.running).grid(row=row, column=0, sticky="w")
+
+            def _update_labels(*_a):
+                self._cycle_lbl.configure(text=f"{float(self.cycle_T.get()):.2f}")
+                self._gap_lbl.configure(text=f"{float(self.phase_gap.get()):.2f}")
+                self._duty_lbl.configure(text=f"{float(self.duty.get()):.2f}")
+
+            self.cycle_T.trace_add("write", _update_labels)
+            self.phase_gap.trace_add("write", _update_labels)
+            self.duty.trace_add("write", _update_labels)
 
     # Build the window
     root = tk.Tk()
-    root.title("Mocap Targets")
+    root.title("Quadruped Gait")
 
     # Capture initial mocap world positions (after move_mocap_to_frame)
     init_right_palm = tuple(map(float, data.mocap_pos[right_palm_mid]))
@@ -362,26 +458,30 @@ if __name__ == "__main__":
     controls = ttk.Frame(root, padding=6)
     controls.pack(fill="both", expand=True)
 
-    # Place panels intuitively: Left Hand (top-left), Right Hand (top-right),
-    # Left Foot (bottom-left), Right Foot (bottom-right)
-    lp = TargetControl(controls, "Left Hand", init_left_palm)
-    rp = TargetControl(controls, "Right Hand", init_right_palm)
-    lf = TargetControl(controls, "Left Foot", init_left_foot)
-    rf = TargetControl(controls, "Right Foot", init_right_foot)
+    # Global gait controls across the top
+    global_ctrl = GlobalGaitControls(controls)
+    global_ctrl.grid(row=0, column=0, columnspan=2, sticky="ew", padx=4, pady=(4, 8))
 
-    lp.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
-    rp.grid(row=0, column=1, sticky="nsew", padx=4, pady=4)
-    lf.grid(row=1, column=0, sticky="nsew", padx=4, pady=4)
-    rf.grid(row=1, column=1, sticky="nsew", padx=4, pady=4)
+    # Per-leg panels: Front Left (Left Hand), Right Rear (Right Foot),
+    # Front Right (Right Hand), Left Rear (Left Foot)
+    fl = LegControl(controls, "Front Left (Left Hand)", init_left_palm)
+    rr = LegControl(controls, "Rear Right (Right Foot)", init_right_foot)
+    fr = LegControl(controls, "Front Right (Right Hand)", init_right_palm)
+    rl = LegControl(controls, "Rear Left (Left Foot)", init_left_foot)
+
+    fl.grid(row=1, column=0, sticky="nsew", padx=4, pady=4)
+    fr.grid(row=1, column=1, sticky="nsew", padx=4, pady=4)
+    rl.grid(row=2, column=0, sticky="nsew", padx=4, pady=4)
+    rr.grid(row=2, column=1, sticky="nsew", padx=4, pady=4)
 
     controls.grid_columnconfigure(0, weight=1)
     controls.grid_columnconfigure(1, weight=1)
-    controls.grid_rowconfigure(0, weight=1)
     controls.grid_rowconfigure(1, weight=1)
+    controls.grid_rowconfigure(2, weight=1)
 
     solver = "daqp"
 
-    with mujoco.viewer.launch_passive(model=model, data=data, show_left_ui=True, show_right_ui=True) as viewer:
+    with mujoco.viewer.launch_passive(model=model, data=data, show_left_ui=False, show_right_ui=False) as viewer:
         mujoco.mjv_defaultFreeCamera(model, viewer.cam)
 
         # Initialize task targets from current configuration
@@ -397,6 +497,28 @@ if __name__ == "__main__":
         right_elbow_orientation_task.set_target_from_configuration(configuration)
 
         rate = RateLimiter(frequency=200.0, warn=False)
+        # Gait state
+        t_sim = 0.0
+        # Leg order and phase offsets per user: FL, RR, FR, RL
+        LEG_ORDER = ("FL", "RR", "FR", "RL")
+        # Map legs to UI panels and mocap ids
+        LEG_TO_UI = {
+            "FL": fl,
+            "FR": fr,
+            "RL": rl,
+            "RR": rr,
+        }
+        LEG_TO_MID = {
+            "FL": left_palm_mid,
+            "FR": right_palm_mid,
+            "RL": left_foot_mid,
+            "RR": right_foot_mid,
+        }
+
+        def _smoothstep(u: float) -> float:
+            u = 0.0 if u < 0.0 else (1.0 if u > 1.0 else u)
+            return u * u * (3.0 - 2.0 * u)
+
         while viewer.is_running():
             # Poll Tk UI (non-blocking)
             try:
@@ -405,27 +527,56 @@ if __name__ == "__main__":
             except Exception:
                 pass
 
-            # Apply UI -> mocap positions (world space)
-            rpx, rpy, rpz = rp.get_xyz()
-            lpx, lpy, lpz = lp.get_xyz()
-            lfx, lfy, lfz = lf.get_xyz()
-            rfx, rfy, rfz = rf.get_xyz()
+            # Advance simulation time if running
+            if bool(global_ctrl.running.get()):
+                t_sim += rate.dt
 
-            data.mocap_pos[right_palm_mid][0] = float(rpx)
-            data.mocap_pos[right_palm_mid][1] = float(rpy)
-            data.mocap_pos[right_palm_mid][2] = float(rpz)
+            T = float(global_ctrl.cycle_T.get())
+            gap = float(global_ctrl.phase_gap.get())
+            duty = float(global_ctrl.duty.get())
+            if T <= 1e-6:
+                T = 1e-6
+            # Compute phase offsets per leg
+            phase_offsets = {
+                "FL": 0.0,
+                "RR": gap,
+                "FR": 2.0 * gap,
+                "RL": 3.0 * gap,
+            }
 
-            data.mocap_pos[left_palm_mid][0] = float(lpx)
-            data.mocap_pos[left_palm_mid][1] = float(lpy)
-            data.mocap_pos[left_palm_mid][2] = float(lpz)
+            # For each leg compute target
+            for leg in LEG_ORDER:
+                ui = LEG_TO_UI[leg]
+                mid = LEG_TO_MID[leg]
+                (ax, ay), (bx, by) = ui.get_endpoints()
+                base_z = ui.base_z
+                lift_h = ui.get_lift_height()
 
-            data.mocap_pos[left_foot_mid][0] = float(lfx)
-            data.mocap_pos[left_foot_mid][1] = float(lfy)
-            data.mocap_pos[left_foot_mid][2] = float(lfz)
+                # Local phase for this leg
+                phi_total = t_sim / T + float(phase_offsets[leg])
+                phi = phi_total - math.floor(phi_total)  # [0,1)
+                step_index = math.floor(phi_total)
+                even = (step_index % 2) == 0
 
-            data.mocap_pos[right_foot_mid][0] = float(rfx)
-            data.mocap_pos[right_foot_mid][1] = float(rfy)
-            data.mocap_pos[right_foot_mid][2] = float(rfz)
+                # Determine endpoints for this cycle's swing
+                start_xy = (ax, ay) if even else (bx, by)
+                end_xy = (bx, by) if even else (ax, ay)
+
+                if phi < duty:
+                    # Stance: hold at start contact on ground
+                    tx, ty = start_xy
+                    tz = base_z
+                else:
+                    # Swing: interpolate to end contact with height arc
+                    s = (phi - duty) / max(1e-6, (1.0 - duty))
+                    s_smooth = _smoothstep(s)
+                    tx = (1.0 - s_smooth) * start_xy[0] + s_smooth * end_xy[0]
+                    ty = (1.0 - s_smooth) * start_xy[1] + s_smooth * end_xy[1]
+                    tz = base_z + lift_h * math.sin(math.pi * s)
+
+                data.mocap_pos[mid][0] = float(tx)
+                data.mocap_pos[mid][1] = float(ty)
+                data.mocap_pos[mid][2] = float(tz)
 
             # Update targets from mocap bodies
             right_hand_task.set_target(mink.SE3.from_mocap_id(data, right_palm_mid))
