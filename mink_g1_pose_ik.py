@@ -548,30 +548,27 @@ if __name__ == "__main__":
             for leg in LEG_ORDER:
                 ui = LEG_TO_UI[leg]
                 mid = LEG_TO_MID[leg]
-                (ax, ay), (bx, by) = ui.get_endpoints()
+                (plant_x, plant_y), (lift_x, lift_y) = ui.get_endpoints()
                 base_z = ui.base_z
                 lift_h = ui.get_lift_height()
 
-                # Local phase for this leg
+                # Local phase for this leg in [0,1)
                 phi_total = t_sim / T + float(phase_offsets[leg])
-                phi = phi_total - math.floor(phi_total)  # [0,1)
-                step_index = math.floor(phi_total)
-                even = (step_index % 2) == 0
-
-                # Determine endpoints for this cycle's swing
-                start_xy = (ax, ay) if even else (bx, by)
-                end_xy = (bx, by) if even else (ax, ay)
+                phi = phi_total - math.floor(phi_total)
 
                 if phi < duty:
-                    # Stance: hold at start contact on ground
-                    tx, ty = start_xy
+                    # Stance: move on ground from lift (back) -> plant (front)
+                    s = phi / max(1e-6, duty)
+                    s_smooth = _smoothstep(s)
+                    tx = (1.0 - s_smooth) * lift_x + s_smooth * plant_x
+                    ty = (1.0 - s_smooth) * lift_y + s_smooth * plant_y
                     tz = base_z
                 else:
-                    # Swing: interpolate to end contact with height arc
+                    # Swing: arc in air from plant (front) -> lift (back)
                     s = (phi - duty) / max(1e-6, (1.0 - duty))
                     s_smooth = _smoothstep(s)
-                    tx = (1.0 - s_smooth) * start_xy[0] + s_smooth * end_xy[0]
-                    ty = (1.0 - s_smooth) * start_xy[1] + s_smooth * end_xy[1]
+                    tx = (1.0 - s_smooth) * plant_x + s_smooth * lift_x
+                    ty = (1.0 - s_smooth) * plant_y + s_smooth * lift_y
                     tz = base_z + lift_h * math.sin(math.pi * s)
 
                 data.mocap_pos[mid][0] = float(tx)
