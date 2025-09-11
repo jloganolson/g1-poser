@@ -3,6 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 import json
 import math
+from datetime import datetime
+import shutil
+import subprocess
 
 import mujoco
 import mujoco.viewer
@@ -13,6 +16,7 @@ import mink
 # Tk UI for target controls
 import tkinter as tk
 from tkinter import ttk
+from tkinter import messagebox, simpledialog
 
 _HERE = Path(__file__).parent
 # Scene with G1 and mocap targets for right hand and both feet
@@ -20,6 +24,7 @@ _XML = _HERE / "g1_description" / "scene_g1_targets.xml"
 
 # Hardcoded pose file exported from pose-tool.py
 _POSES_JSON = _HERE / "crawl-pose.json"
+_OUT_DIR = _HERE / "output"
 
 
 def _rpy_to_quat(roll: float, pitch: float, yaw: float) -> tuple[float, float, float, float]:
@@ -420,6 +425,9 @@ if __name__ == "__main__":
             self.lift_y.set(self._init_lift_y)
             self.lift_h.set(self._init_lift_h)
 
+        def set_base_z(self, new_base_z: float) -> None:
+            self.base_z = float(new_base_z)
+
     class GlobalGaitControls(ttk.LabelFrame):
         def __init__(self, parent: tk.Misc) -> None:
             super().__init__(parent, text="Gait", padding=6)
@@ -473,6 +481,16 @@ if __name__ == "__main__":
             self.running.set(True)
             self.front_sym.set(False)
             self.rear_sym.set(False)
+
+        def snapshot(self) -> dict:
+            return {
+                "cycle_T": float(self.cycle_T.get()),
+                "phase_gap": float(self.phase_gap.get()),
+                "duty": float(self.duty.get()),
+                "running": bool(self.running.get()),
+                "front_sym": bool(self.front_sym.get()),
+                "rear_sym": bool(self.rear_sym.get()),
+            }
 
     # Build the window
     root = tk.Tk()
@@ -603,6 +621,171 @@ if __name__ == "__main__":
 
     # Add Reset button to global controls
     ttk.Button(global_ctrl, text="Reset", command=_reset_all).grid(row=7, column=0, sticky="w", pady=(6, 0))
+
+    # --- JSON import/export helpers (reuse strategy from pose-tool.py) ---
+    def _safe_open_json_path(parent, initialdir: Path) -> Path | None:
+        try:
+            zenity = shutil.which("zenity")
+            if zenity:
+                cmd = [
+                    zenity,
+                    "--file-selection",
+                    "--title=Import Configuration",
+                    f"--filename={str(initialdir)}/",
+                    "--file-filter=JSON files | *.json *.JSON",
+                ]
+                proc = subprocess.run(cmd, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                if proc.returncode == 0:
+                    selected = proc.stdout.strip()
+                    if selected:
+                        p = Path(selected)
+                        if p.exists():
+                            return p
+                return None
+        except Exception:
+            print("Zenity path failed for any reason, falling through to simple prompt")
+            pass
+
+        try:
+            path_str = simpledialog.askstring(
+                title="Import Configuration",
+                prompt="Path to JSON file:",
+                parent=parent,
+            )
+            if path_str:
+                p = Path(path_str).expanduser()
+                if p.exists():
+                    return p
+        except Exception:
+            pass
+        return None
+
+    def _snapshot_config() -> dict:
+        def leg_snapshot(ctrl: LegControl) -> dict:
+            (px, py), (lx, ly) = ctrl.get_endpoints()
+            return {
+                "plant": [float(px), float(py)],
+                "lift": [float(lx), float(ly)],
+                "lift_h": float(ctrl.get_lift_height()),
+                "base_z": float(ctrl.base_z),
+            }
+
+        return {
+            "global": global_ctrl.snapshot(),
+            "legs": {
+                "FL": leg_snapshot(fl),
+                "FR": leg_snapshot(fr),
+                "RL": leg_snapshot(rl),
+                "RR": leg_snapshot(rr),
+            },
+            "timestamp": datetime.now().isoformat(),
+            "schema": "gait_config.v1",
+        }
+
+    def _apply_config(cfg: dict) -> None:
+        global t_sim
+        try:
+            # Temporarily disable symmetry to avoid feedback during set
+            old_front = bool(global_ctrl.front_sym.get())
+            old_rear = bool(global_ctrl.rear_sym.get())
+            global_ctrl.front_sym.set(False)
+            global_ctrl.rear_sym.set(False)
+
+            g = cfg.get("global", {}) or {}
+            try:
+                if "cycle_T" in g:
+                    global_ctrl.cycle_T.set(float(g.get("cycle_T", float(global_ctrl.cycle_T.get()))))
+                if "phase_gap" in g:
+                    global_ctrl.phase_gap.set(float(g.get("phase_gap", float(global_ctrl.phase_gap.get()))))
+                if "duty" in g:
+                    global_ctrl.duty.set(float(g.get("duty", float(global_ctrl.duty.get()))))
+                if "running" in g:
+                    global_ctrl.running.set(bool(g.get("running", bool(global_ctrl.running.get()))))
+            except Exception:
+                pass
+
+            legs = cfg.get("legs", {}) or {}
+
+            def set_leg(name: str, ctrl: LegControl) -> None:
+                s = legs.get(name) or {}
+                try:
+                    plant = s.get("plant")
+                    if isinstance(plant, (list, tuple)) and len(plant) == 2:
+                        ctrl.plant_x.set(float(plant[0]))
+                        ctrl.plant_y.set(float(plant[1]))
+                    lift = s.get("lift")
+                    if isinstance(lift, (list, tuple)) and len(lift) == 2:
+                        ctrl.lift_x.set(float(lift[0]))
+                        ctrl.lift_y.set(float(lift[1]))
+                    if "lift_h" in s:
+                        ctrl.lift_h.set(float(s.get("lift_h", ctrl.get_lift_height())))
+                    if "base_z" in s:
+                        ctrl.set_base_z(float(s.get("base_z", ctrl.base_z)))
+                except Exception:
+                    pass
+
+            set_leg("FL", fl)
+            set_leg("FR", fr)
+            set_leg("RL", rl)
+            set_leg("RR", rr)
+
+            # Restore symmetry flags from config
+            try:
+                if "front_sym" in g:
+                    global_ctrl.front_sym.set(bool(g.get("front_sym", old_front)))
+                else:
+                    global_ctrl.front_sym.set(old_front)
+                if "rear_sym" in g:
+                    global_ctrl.rear_sym.set(bool(g.get("rear_sym", old_rear)))
+                else:
+                    global_ctrl.rear_sym.set(old_rear)
+            except Exception:
+                pass
+
+            # Reset phase so gait starts consistently
+            t_sim = 0.0
+        except Exception:
+            pass
+
+    def _on_import() -> None:
+        p = _safe_open_json_path(root, _HERE)
+        if p is None:
+            return
+        try:
+            cfg = json.loads(p.read_text())
+            if not isinstance(cfg, dict):
+                raise ValueError("Invalid configuration file format")
+            _apply_config(cfg)
+            try:
+                messagebox.showinfo("Import", f"Loaded configuration from {p.name}")
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                messagebox.showerror("Import failed", str(e))
+            except Exception:
+                pass
+
+    def _on_export() -> None:
+        try:
+            serial = _snapshot_config()
+            _OUT_DIR.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            path = _OUT_DIR / f"gait_{ts}.json"
+            path.write_text(json.dumps(serial, indent=2))
+            try:
+                messagebox.showinfo("Export", f"Saved to {path.name}")
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                messagebox.showerror("Export failed", str(e))
+            except Exception:
+                pass
+
+    # Import/Export buttons
+    ttk.Button(global_ctrl, text="Import…", command=_on_import).grid(row=7, column=1, sticky="w", pady=(6, 0), padx=(8, 0))
+    ttk.Button(global_ctrl, text="Export", command=_on_export).grid(row=7, column=2, sticky="w", pady=(6, 0), padx=(8, 0))
 
     solver = "daqp"
 
