@@ -362,6 +362,12 @@ if __name__ == "__main__":
             super().__init__(parent, text=label, padding=6)
             ix, iy, iz = init_xyz
             self.base_z = float(iz)
+            # Store initial values for reset
+            self._init_plant_x = float(ix)
+            self._init_plant_y = float(iy)
+            self._init_lift_x = float(ix + default_step_forward)
+            self._init_lift_y = float(iy)
+            self._init_lift_h = 0.08
             # Two endpoints on ground (plant and lift)
             self.plant_x = tk.DoubleVar(value=float(ix))
             self.plant_y = tk.DoubleVar(value=float(iy))
@@ -405,6 +411,14 @@ if __name__ == "__main__":
 
         def get_lift_height(self) -> float:
             return float(self.lift_h.get())
+
+        def reset(self) -> None:
+            """Reset UI variables to initial values."""
+            self.plant_x.set(self._init_plant_x)
+            self.plant_y.set(self._init_plant_y)
+            self.lift_x.set(self._init_lift_x)
+            self.lift_y.set(self._init_lift_y)
+            self.lift_h.set(self._init_lift_h)
 
     class GlobalGaitControls(ttk.LabelFrame):
         def __init__(self, parent: tk.Misc) -> None:
@@ -450,6 +464,15 @@ if __name__ == "__main__":
             self.cycle_T.trace_add("write", _update_labels)
             self.phase_gap.trace_add("write", _update_labels)
             self.duty.trace_add("write", _update_labels)
+
+        def reset(self) -> None:
+            """Reset global gait parameters to defaults and disable symmetries."""
+            self.cycle_T.set(1.2)
+            self.phase_gap.set(0.25)
+            self.duty.set(0.7)
+            self.running.set(True)
+            self.front_sym.set(False)
+            self.rear_sym.set(False)
 
     # Build the window
     root = tk.Tk()
@@ -534,6 +557,53 @@ if __name__ == "__main__":
     _bind_symmetry_pair(fl, fr, global_ctrl.front_sym)
     _bind_symmetry_pair(rl, rr, global_ctrl.rear_sym)
 
+    # Global gait phase time (seconds)
+    t_sim = 0.0
+
+    # Reset handler to restore UI and mocap targets
+    def _reset_all() -> None:
+        global t_sim
+        try:
+            # Reset global parameters first to avoid symmetry mirroring during leg resets
+            global_ctrl.reset()
+
+            # Reset each leg UI to its initial state
+            fl.reset()
+            fr.reset()
+            rl.reset()
+            rr.reset()
+
+            # Reset gait phase time
+            t_sim = 0.0
+
+            # Restore mocap target positions to initial captured values
+            data.mocap_pos[right_palm_mid][0] = init_right_palm[0]
+            data.mocap_pos[right_palm_mid][1] = init_right_palm[1]
+            data.mocap_pos[right_palm_mid][2] = init_right_palm[2]
+
+            data.mocap_pos[left_palm_mid][0] = init_left_palm[0]
+            data.mocap_pos[left_palm_mid][1] = init_left_palm[1]
+            data.mocap_pos[left_palm_mid][2] = init_left_palm[2]
+
+            data.mocap_pos[left_foot_mid][0] = init_left_foot[0]
+            data.mocap_pos[left_foot_mid][1] = init_left_foot[1]
+            data.mocap_pos[left_foot_mid][2] = init_left_foot[2]
+
+            data.mocap_pos[right_foot_mid][0] = init_right_foot[0]
+            data.mocap_pos[right_foot_mid][1] = init_right_foot[1]
+            data.mocap_pos[right_foot_mid][2] = init_right_foot[2]
+
+            # Nudge UI redraw
+            try:
+                root.update_idletasks()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    # Add Reset button to global controls
+    ttk.Button(global_ctrl, text="Reset", command=_reset_all).grid(row=7, column=0, sticky="w", pady=(6, 0))
+
     solver = "daqp"
 
     with mujoco.viewer.launch_passive(model=model, data=data, show_left_ui=False, show_right_ui=False) as viewer:
@@ -552,8 +622,6 @@ if __name__ == "__main__":
         right_elbow_orientation_task.set_target_from_configuration(configuration)
 
         rate = RateLimiter(frequency=200.0, warn=False)
-        # Gait state
-        t_sim = 0.0
         # Leg order and phase offsets per user: FL, RR, FR, RL
         LEG_ORDER = ("FL", "RR", "FR", "RL")
         # Map legs to UI panels and mocap ids
