@@ -386,7 +386,7 @@ if __name__ == "__main__":
             pad.grid(row=0, column=0, rowspan=3, sticky="nsew", padx=(0, 8))
 
             ttk.Label(self, text="Lift height (m)").grid(row=0, column=1, sticky="w")
-            lift_scale = ttk.Scale(self, from_=0.0, to=0.3, variable=self.lift_h, orient="vertical", length=160)
+            lift_scale = ttk.Scale(self, from_=0.3, to=0.0, variable=self.lift_h, orient="vertical", length=160)
             lift_scale.grid(row=1, column=1, sticky="nsw")
             self.lift_readout = ttk.Label(self, text=f"{float(self.lift_h.get()):.3f}")
             self.lift_readout.grid(row=2, column=1, sticky="w")
@@ -413,6 +413,8 @@ if __name__ == "__main__":
             self.phase_gap = tk.DoubleVar(value=0.25)  # fraction of cycle between legs
             self.duty = tk.DoubleVar(value=0.7)        # stance fraction
             self.running = tk.BooleanVar(value=True)
+            self.front_sym = tk.BooleanVar(value=False)
+            self.rear_sym = tk.BooleanVar(value=False)
 
             # Layout sliders and readouts
             row = 0
@@ -435,6 +437,10 @@ if __name__ == "__main__":
             row += 1
 
             ttk.Checkbutton(self, text="Run", variable=self.running).grid(row=row, column=0, sticky="w")
+            row += 1
+            ttk.Checkbutton(self, text="Front symmetry (FL ↔ FR)", variable=self.front_sym).grid(row=row, column=0, sticky="w")
+            row += 1
+            ttk.Checkbutton(self, text="Rear symmetry (RL ↔ RR)", variable=self.rear_sym).grid(row=row, column=0, sticky="w")
 
             def _update_labels(*_a):
                 self._cycle_lbl.configure(text=f"{float(self.cycle_T.get()):.2f}")
@@ -478,6 +484,55 @@ if __name__ == "__main__":
     controls.grid_columnconfigure(1, weight=1)
     controls.grid_rowconfigure(1, weight=1)
     controls.grid_rowconfigure(2, weight=1)
+
+    # Symmetry bindings: mirror Y across midline (y -> -y), copy X
+    def _bind_symmetry_pair(left: LegControl, right: LegControl, sym_var: tk.BooleanVar) -> None:
+        in_update = {"flag": False}
+
+        def _mirror(src: LegControl, dst: LegControl) -> None:
+            dst.plant_x.set(float(src.plant_x.get()))
+            dst.plant_y.set(-float(src.plant_y.get()))
+            dst.lift_x.set(float(src.lift_x.get()))
+            dst.lift_y.set(-float(src.lift_y.get()))
+            dst.lift_h.set(float(src.lift_h.get()))
+
+        def _on_left(*_a) -> None:
+            if not bool(sym_var.get()) or in_update["flag"]:
+                return
+            in_update["flag"] = True
+            _mirror(left, right)
+            in_update["flag"] = False
+
+        def _on_right(*_a) -> None:
+            if not bool(sym_var.get()) or in_update["flag"]:
+                return
+            in_update["flag"] = True
+            _mirror(right, left)
+            in_update["flag"] = False
+
+        left.plant_x.trace_add("write", _on_left)
+        left.plant_y.trace_add("write", _on_left)
+        left.lift_x.trace_add("write", _on_left)
+        left.lift_y.trace_add("write", _on_left)
+        left.lift_h.trace_add("write", _on_left)
+
+        right.plant_x.trace_add("write", _on_right)
+        right.plant_y.trace_add("write", _on_right)
+        right.lift_x.trace_add("write", _on_right)
+        right.lift_y.trace_add("write", _on_right)
+        right.lift_h.trace_add("write", _on_right)
+
+        def _on_toggle(*_a) -> None:
+            if bool(sym_var.get()):
+                in_update["flag"] = True
+                _mirror(left, right)
+                in_update["flag"] = False
+
+        sym_var.trace_add("write", _on_toggle)
+
+    # Bind front and rear pairs
+    _bind_symmetry_pair(fl, fr, global_ctrl.front_sym)
+    _bind_symmetry_pair(rl, rr, global_ctrl.rear_sym)
 
     solver = "daqp"
 
