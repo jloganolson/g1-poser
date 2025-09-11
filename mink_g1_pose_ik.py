@@ -211,17 +211,24 @@ if __name__ == "__main__":
             self._dragging = False
 
             def _to_canvas_coords(x_world: float, y_world: float) -> tuple[float, float]:
-                u = (x_world - self.x_center) / self.x_half
-                v = (y_world - self.y_center) / self.y_half
-                cx = (u * 0.5 + 0.5) * self.w
-                cy = (-(v) * 0.5 + 0.5) * self.h
+                # Canvas X controls world Y (left/right relative to body center)
+                # Canvas Y controls world X (forward/back relative to body center)
+                u_y = (y_world - self.y_center) / self.y_half
+                v_x = (x_world - self.x_center) / self.x_half
+                # Left on canvas → larger +Y (left of body): negate u_y
+                cx = (-u_y * 0.5 + 0.5) * self.w
+                # Up on canvas → larger +X (forward): negate v_x
+                cy = (-v_x * 0.5 + 0.5) * self.h
                 return cx, cy
 
             def _to_world_coords(cx: float, cy: float) -> tuple[float, float]:
+                # u: + to the right on canvas; left is negative
+                # v: + downward on canvas; up is negative
                 u = (cx / self.w - 0.5) * 2.0
-                v = -((cy / self.h - 0.5) * 2.0)
-                xw = self.x_center + max(-1.0, min(1.0, u)) * self.x_half
-                yw = self.y_center + max(-1.0, min(1.0, v)) * self.y_half
+                v = (cy / self.h - 0.5) * 2.0
+                # Left on canvas (u<0) → +Y (left), Up on canvas (v<0) → +X (forward)
+                xw = self.x_center - max(-1.0, min(1.0, v)) * self.x_half
+                yw = self.y_center - max(-1.0, min(1.0, u)) * self.y_half
                 return xw, yw
 
             self._to_canvas_coords = _to_canvas_coords  # type: ignore[attr-defined]
@@ -270,7 +277,8 @@ if __name__ == "__main__":
             pad.grid(row=0, column=0, rowspan=3, sticky="nsew", padx=(0, 8))
 
             ttk.Label(self, text="Z (m)").grid(row=0, column=1, sticky="w")
-            z_scale = ttk.Scale(self, from_=self.z_min, to=self.z_max, variable=self.z, orient="vertical", length=160)
+            # Invert so top is max height
+            z_scale = ttk.Scale(self, from_=self.z_max, to=self.z_min, variable=self.z, orient="vertical", length=160)
             z_scale.grid(row=1, column=1, sticky="nsw")
             self.z_readout = ttk.Label(self, text=f"{float(self.z.get()):.3f}")
             self.z_readout.grid(row=2, column=1, sticky="w")
@@ -298,14 +306,15 @@ if __name__ == "__main__":
     controls = ttk.Frame(root, padding=6)
     controls.pack(fill="both", expand=True)
 
-    rp = TargetControl(controls, "Right Hand", init_right_palm)
+    # Place panels intuitively: Left Hand (top-left), Right Hand (top-right),
+    # Left Foot (bottom-left), Right Foot (bottom-right)
     lp = TargetControl(controls, "Left Hand", init_left_palm)
+    rp = TargetControl(controls, "Right Hand", init_right_palm)
     lf = TargetControl(controls, "Left Foot", init_left_foot)
     rf = TargetControl(controls, "Right Foot", init_right_foot)
 
-    # Layout 2x2 grid
-    rp.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
-    lp.grid(row=0, column=1, sticky="nsew", padx=4, pady=4)
+    lp.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+    rp.grid(row=0, column=1, sticky="nsew", padx=4, pady=4)
     lf.grid(row=1, column=0, sticky="nsew", padx=4, pady=4)
     rf.grid(row=1, column=1, sticky="nsew", padx=4, pady=4)
 
