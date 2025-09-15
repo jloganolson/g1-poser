@@ -547,32 +547,35 @@ if __name__ == "__main__":
         right_elbow_orientation_task,
     ])
 
+    HAND_POSITION_COST = 25.0
+    FOOT_POSITION_COST = 30.0
+
     # End-effector tasks
     right_hand_task = mink.FrameTask(
         frame_name="right_palm",
         frame_type="site",
-        position_cost=5.0,
+        position_cost=HAND_POSITION_COST,
         orientation_cost=0.0,
         lm_damping=1.0,
     )
     left_hand_task = mink.FrameTask(
         frame_name="left_palm",
         frame_type="site",
-        position_cost=5.0,
+        position_cost=HAND_POSITION_COST,
         orientation_cost=0.0,
         lm_damping=1.0,
     )
     left_foot_task = mink.FrameTask(
         frame_name="left_foot",
         frame_type="site",
-        position_cost=10.0,
+        position_cost=FOOT_POSITION_COST,
         orientation_cost=0.0,
         lm_damping=1.0,
     )
     right_foot_task = mink.FrameTask(
         frame_name="right_foot",
         frame_type="site",
-        position_cost=10.0,
+        position_cost=FOOT_POSITION_COST,
         orientation_cost=0.0,
         lm_damping=1.0,
     )
