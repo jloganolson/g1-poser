@@ -63,6 +63,21 @@ def _shift_base_z_to_ground(model: mujoco.MjModel, data: mujoco.MjData, left_sit
         pass
 
 
+def _swing_interp(p0: tuple[float, float, float], p1: tuple[float, float, float], phase: float, height: float) -> tuple[float, float, float]:
+    """Parabolic swing interpolation between p0 and p1 on z=0 with apex height.
+
+    phase in [0, 1]. x/y linearly interpolate; z follows a parabola peaking at `height`.
+    """
+    if phase <= 0.0:
+        return (p0[0], p0[1], 0.0)
+    if phase >= 1.0:
+        return (p1[0], p1[1], 0.0)
+    x = p0[0] + (p1[0] - p0[0]) * phase
+    y = p0[1] + (p1[1] - p0[1]) * phase
+    z = 4.0 * phase * (1.0 - phase) * height
+    return (x, y, z)
+
+
 if __name__ == "__main__":
     # Load scene and build initial state
     model = mujoco.MjModel.from_xml_path(_XML.as_posix())
@@ -255,7 +270,7 @@ if __name__ == "__main__":
     mink.move_mocap_to_frame(model, data, "left_foot_target", "left_foot", "site")
     mink.move_mocap_to_frame(model, data, "right_foot_target", "right_foot", "site")
 
-    # Plant all four end-effectors on ground plane (z = 0) and freeze their positions
+    # Plant all four end-effectors on ground plane (z = 0)
     # Capture baseline world positions
     base_left_hand = tuple(float(x) for x in data.mocap_pos[left_palm_mid])
     base_right_hand = tuple(float(x) for x in data.mocap_pos[right_palm_mid])
@@ -306,29 +321,139 @@ if __name__ == "__main__":
                 float(configuration.data.qpos[free_qpos_addr + 2]),
             )
 
+        # Procedural crawl gait parameters
+        torso_fwd_speed = 0.10  # m/s constant forward base translation along +x
+        forward_bias = 0.00     # optional forward bias beyond neutral pelvis-relative replant
+        step_period = 1.20      # s per diagonal pair cycle
+        swing_fraction = 0.45   # fraction of period spent in swing
+        swing_height = 0.06     # m apex height of swing arc
+
+        # Gait state
+        s_forward = 0.0
+        gait_time = 0.0
+        last_step_index = 0
+        pair = 0  # 0: swing (right hand + left foot), 1: swing (left hand + right foot)
+        swing_duration = swing_fraction * step_period
+
+        # Resolve pelvis body id after viewer starts and compute initial offsets
+        pelvis_bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "pelvis")
+        pelvis_pos0 = (
+            float(data.xpos[pelvis_bid][0]),
+            float(data.xpos[pelvis_bid][1]),
+            float(data.xpos[pelvis_bid][2]),
+        )
+
+        # Desired offsets in pelvis frame (x,y) for each limb
+        des_off_LH = [base_left_hand[0] - pelvis_pos0[0], base_left_hand[1] - pelvis_pos0[1]]
+        des_off_RH = [base_right_hand[0] - pelvis_pos0[0], base_right_hand[1] - pelvis_pos0[1]]
+        des_off_LF = [base_left_foot[0] - pelvis_pos0[0], base_left_foot[1] - pelvis_pos0[1]]
+        des_off_RF = [base_right_foot[0] - pelvis_pos0[0], base_right_foot[1] - pelvis_pos0[1]]
+
+        # Initialize first swing starts/targets using pelvis-relative offsets
+        swing_start_RH = base_right_hand
+        swing_start_LF = base_left_foot
+        swing_start_LH = base_left_hand
+        swing_start_RF = base_right_foot
+        swing_target_RH = (
+            pelvis_pos0[0] + des_off_RH[0] + forward_bias,
+            pelvis_pos0[1] + des_off_RH[1],
+            0.0,
+        )
+        swing_target_LF = (
+            pelvis_pos0[0] + des_off_LF[0] + forward_bias,
+            pelvis_pos0[1] + des_off_LF[1],
+            0.0,
+        )
+        swing_target_LH = (
+            pelvis_pos0[0] + des_off_LH[0] + forward_bias,
+            pelvis_pos0[1] + des_off_LH[1],
+            0.0,
+        )
+        swing_target_RF = (
+            pelvis_pos0[0] + des_off_RF[0] + forward_bias,
+            pelvis_pos0[1] + des_off_RF[1],
+            0.0,
+        )
+
         while viewer.is_running():
             t += rate.dt
+            gait_time += rate.dt
 
-            # Keep all four targets fixed at planted positions
-            data.mocap_pos[left_palm_mid][:] = base_left_hand
-            data.mocap_pos[right_palm_mid][:] = base_right_hand
-            data.mocap_pos[left_foot_mid][:] = base_left_foot
-            data.mocap_pos[right_foot_mid][:] = base_right_foot
-
-            # Wiggle pelvis/torso by translating the free base slightly
+            # Advance torso forward with gentle lateral wiggle
             if base_xyz0 is not None and free_qpos_addr is not None:
+                s_forward += torso_fwd_speed * rate.dt
                 amp_xy = 0.03
                 freq = 0.3
                 dx = amp_xy * math.sin(2.0 * math.pi * freq * t)
                 dy = amp_xy * math.cos(2.0 * math.pi * freq * t)
-                configuration.data.qpos[free_qpos_addr + 0] = base_xyz0[0] + dx
+                configuration.data.qpos[free_qpos_addr + 0] = base_xyz0[0] + s_forward + dx
                 configuration.data.qpos[free_qpos_addr + 1] = base_xyz0[1] + dy
                 configuration.data.qpos[free_qpos_addr + 2] = base_xyz0[2]
                 mujoco.mj_forward(configuration.model, configuration.data)
-                # Update pelvis/torso task targets to the new base pose
                 pelvis_orientation_task.set_target_from_configuration(configuration)
                 pelvis_position_task.set_target_from_configuration(configuration)
                 torso_orientation_task.set_target_from_configuration(configuration)
+
+            # Gait phase updates
+            step_index = int(gait_time // step_period)
+            if step_index != last_step_index:
+                # Commit last swing: replant to targets
+                if pair == 0:
+                    base_right_hand = swing_target_RH
+                    base_left_foot = swing_target_LF
+                else:
+                    base_left_hand = swing_target_LH
+                    base_right_foot = swing_target_RF
+
+                # Alternate swing pair
+                pair = 1 - pair
+
+                # Prepare next swing start/targets using constant pelvis-relative offsets (no accumulation)
+                pelvis_pos_start = (
+                    float(data.xpos[pelvis_bid][0]),
+                    float(data.xpos[pelvis_bid][1]),
+                    float(data.xpos[pelvis_bid][2]),
+                )
+                if pair == 0:
+                    # Next swing: right hand + left foot; return to neutral pelvis-relative offsets
+                    swing_start_RH = base_right_hand
+                    swing_start_LF = base_left_foot
+                    swing_target_RH = (pelvis_pos_start[0] + des_off_RH[0] + forward_bias, pelvis_pos_start[1] + des_off_RH[1], 0.0)
+                    swing_target_LF = (pelvis_pos_start[0] + des_off_LF[0] + forward_bias, pelvis_pos_start[1] + des_off_LF[1], 0.0)
+                else:
+                    # Next swing: left hand + right foot; return to neutral pelvis-relative offsets
+                    swing_start_LH = base_left_hand
+                    swing_start_RF = base_right_foot
+                    swing_target_LH = (pelvis_pos_start[0] + des_off_LH[0] + forward_bias, pelvis_pos_start[1] + des_off_LH[1], 0.0)
+                    swing_target_RF = (pelvis_pos_start[0] + des_off_RF[0] + forward_bias, pelvis_pos_start[1] + des_off_RF[1], 0.0)
+                last_step_index = step_index
+
+            phase_time = gait_time - (step_index * step_period)
+            phi = min(1.0, max(0.0, phase_time / swing_duration))
+
+            # Set mocap targets for stance limbs (remain planted)
+            if pair == 0:
+                # Stance: left hand, right foot
+                data.mocap_pos[left_palm_mid][:] = base_left_hand
+                data.mocap_pos[right_foot_mid][:] = base_right_foot
+                # Swing: right hand, left foot
+                if phase_time < swing_duration:
+                    data.mocap_pos[right_palm_mid][:] = _swing_interp(swing_start_RH, swing_target_RH, phi, swing_height)
+                    data.mocap_pos[left_foot_mid][:] = _swing_interp(swing_start_LF, swing_target_LF, phi, swing_height)
+                else:
+                    data.mocap_pos[right_palm_mid][:] = swing_target_RH
+                    data.mocap_pos[left_foot_mid][:] = swing_target_LF
+            else:
+                # Stance: right hand, left foot
+                data.mocap_pos[right_palm_mid][:] = base_right_hand
+                data.mocap_pos[left_foot_mid][:] = base_left_foot
+                # Swing: left hand, right foot
+                if phase_time < swing_duration:
+                    data.mocap_pos[left_palm_mid][:] = _swing_interp(swing_start_LH, swing_target_LH, phi, swing_height)
+                    data.mocap_pos[right_foot_mid][:] = _swing_interp(swing_start_RF, swing_target_RF, phi, swing_height)
+                else:
+                    data.mocap_pos[left_palm_mid][:] = swing_target_LH
+                    data.mocap_pos[right_foot_mid][:] = swing_target_RF
 
             # Update IK targets from mocap
             right_hand_task.set_target(mink.SE3.from_mocap_id(data, right_palm_mid))

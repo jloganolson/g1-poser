@@ -156,11 +156,12 @@
                 <joint name="left_ankle_pitch_joint" class="ankle_pitch"/>
                 <geom class="visual" mesh="left_ankle_pitch_link"/>
                 <body name="left_ankle_roll_link" pos="0 0 -0.017558">
-                  <site name="left_foot" rgba="1 0 0 1"/>
+                
                   <inertial pos="0.026505 0 -0.016425" quat="-0.000481092 0.728482 -0.000618967 0.685065" mass="0.608"
                     diaginertia="0.00167218 0.0016161 0.000217621"/>
                   <joint name="left_ankle_roll_joint" class="ankle_roll"/>
                   <geom class="visual" material="black" mesh="left_ankle_roll_link"/>
+                  <site name="left_foot" pos="0 0 -0.035" rgba="1 0 0 1"/>
                   <geom name="left_foot" class="foot" pos="0.04 0 -0.029" size="0.09 0.03 0.008" type="box"/>
                 </body>
               </body>
@@ -196,11 +197,11 @@
                 <joint name="right_ankle_pitch_joint" class="ankle_pitch"/>
                 <geom class="visual" mesh="right_ankle_pitch_link"/>
                 <body name="right_ankle_roll_link" pos="0 0 -0.017558">
-                  <site name="right_foot" pos="0 0 0"/>
                   <inertial pos="0.026505 0 -0.016425" quat="0.000481092 0.728482 0.000618967 0.685065" mass="0.608"
                     diaginertia="0.00167218 0.0016161 0.000217621"/>
                   <joint name="right_ankle_roll_joint" class="ankle_roll"/>
                   <geom class="visual" material="black" mesh="right_ankle_roll_link"/>
+                  <site name="right_foot" pos="0 0 -0.035" rgba="1 0 0 1"/>
                   <geom name="right_foot" class="foot" pos="0.04 0 -0.029" size="0.09 0.03 0.008" type="box"/>
                 </body>
               </body>
@@ -249,7 +250,7 @@
                     <inertial pos="0.111202 -7.2e-05 0.000102" mass="0.106" fullinertia="5.02585e-05 0.000444834 0.000444931 -7.91587e-07 1.13798e-06 -1.20104e-07"  />
                     <joint name="left_wrist_roll_joint" class="wrist_roll"/>
                     <geom class="visual" mesh="forearm"/>
-                    <site name="left_palm" pos="0.08 0 0" size="0.01"/>
+                    <site name="left_palm" pos="0.2 0 0" size="0.01"/>
                     <geom name="left_hand_collision" class="collision" type="sphere" size="0.02" pos="0.18 0 0" rgba=".2 .6 .2 .2"/>
                   </body>
                 </body>
@@ -284,7 +285,7 @@
                     <inertial pos="0.111202 -7.2e-05 0.000102" mass="0.106" fullinertia="5.02585e-05 0.000444834 0.000444931 -7.91587e-07 1.13798e-06 -1.20104e-07"  />
                     <joint name="right_wrist_roll_joint" class="wrist_roll"/>
                     <geom class="visual" mesh="forearm"/>
-                    <site name="right_palm" pos="0.08 0 0" size="0.01"/>
+                    <site name="right_palm" pos="0.2 0 0" size="0.01"/>
                     <geom name="right_hand_collision" class="collision" type="sphere" size="0.02" pos="0.18 0 0" rgba=".2 .6 .2 .2"/>
                   </body>
                 </body>
