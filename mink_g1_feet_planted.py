@@ -473,6 +473,18 @@ if __name__ == "__main__":
             self.phase_gap.trace_add("write", _update_labels)
             self.duty.trace_add("write", _update_labels)
 
+        def reset(self) -> None:
+            """Reset global gait parameters to defaults and disable symmetries."""
+            try:
+                self.cycle_T.set(1.2)
+                self.phase_gap.set(0.25)
+                self.duty.set(0.7)
+                self.running.set(True)
+                self.front_sym.set(False)
+                self.rear_sym.set(False)
+            except Exception:
+                pass
+
     # IK tasks mirroring mink_g1_pose_ik.py
     tasks = [
         # Pelvis stability
@@ -629,6 +641,9 @@ if __name__ == "__main__":
     data.mocap_pos[right_palm_mid][:] = base_right_hand
     data.mocap_pos[left_foot_mid][:] = base_left_foot
     data.mocap_pos[right_foot_mid][:] = base_right_foot
+
+    # Snapshot initial generalized coordinates (after base shift and mocap planting)
+    qpos_init = [float(x) for x in data.qpos]
 
     # Viewer + IK loop
     solver = "daqp"
@@ -827,6 +842,84 @@ if __name__ == "__main__":
                 "target_w": target_w0,
                 "in_stance": in_stance0,
             }
+
+        # Reset button handler and wiring
+        def _reset_all() -> None:
+            global t_sim, s_forward
+            try:
+                # Reset UI controls
+                tv_speed.set(0.10)
+                tv_cam_az.set(137.368)
+                tv_cam_el.set(-16.395)
+                tv_cam_dist.set(2.355)
+                global_ctrl.reset()
+                fl.reset()
+                fr.reset()
+                rl.reset()
+                rr.reset()
+
+                # Reset timers and base forward displacement
+                t_sim = 0.0
+                s_forward = 0.0
+
+                # Restore full generalized coordinates to startup snapshot
+                for i, v in enumerate(qpos_init):
+                    configuration.data.qpos[i] = float(v)
+                mujoco.mj_forward(configuration.model, configuration.data)
+                # Refresh all task targets to current configuration
+                posture_task.set_target_from_configuration(configuration)
+                pelvis_orientation_task.set_target_from_configuration(configuration)
+                pelvis_position_task.set_target_from_configuration(configuration)
+                torso_orientation_task.set_target_from_configuration(configuration)
+                left_foot_orientation_task.set_target_from_configuration(configuration)
+                right_foot_orientation_task.set_target_from_configuration(configuration)
+                left_knee_orientation_task.set_target_from_configuration(configuration)
+                right_knee_orientation_task.set_target_from_configuration(configuration)
+                left_elbow_orientation_task.set_target_from_configuration(configuration)
+                right_elbow_orientation_task.set_target_from_configuration(configuration)
+
+                # Recompute initial stance state using current parameters
+                T0 = float(global_ctrl.cycle_T.get())
+                gap0 = float(global_ctrl.phase_gap.get())
+                duty0 = float(global_ctrl.duty.get())
+                if T0 <= 1e-6:
+                    T0 = 1e-6
+                phase_offsets0 = {"FL": 0.0, "RR": gap0, "FR": 2.0 * gap0, "RL": 3.0 * gap0}
+
+                pelvis_x = float(data.xpos[pelvis_bid][0]) if pelvis_bid != -1 else 0.0
+                pelvis_y = float(data.xpos[pelvis_bid][1]) if pelvis_bid != -1 else 0.0
+
+                LEG_STATE.clear()
+                for leg in LEG_ORDER:
+                    ui = LEG_TO_UI[leg]
+                    (plant_x, plant_y), (lift_x, lift_y) = ui.get_endpoints()
+                    # On reset: set contact to plant position relative to pelvis at reset
+                    contact_w0 = (pelvis_x + float(plant_x), pelvis_y + float(plant_y))
+                    target_w0 = (pelvis_x + float(lift_x), pelvis_y + float(lift_y))
+                    phi0 = phase_offsets0[leg] - math.floor(phase_offsets0[leg])
+                    in_stance0 = bool(phi0 < duty0)
+                    LEG_STATE[leg] = {
+                        "contact_w": contact_w0,
+                        "target_w": target_w0,
+                        "in_stance": in_stance0,
+                    }
+
+                    # Reset mocap to planted contact position at ground/base z
+                    mid = LEG_TO_MID[leg]
+                    cx, cy = contact_w0
+                    tz = ui.base_z
+                    data.mocap_pos[mid][0] = float(cx)
+                    data.mocap_pos[mid][1] = float(cy)
+                    data.mocap_pos[mid][2] = float(tz)
+
+                try:
+                    root.update_idletasks()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+        ttk.Button(global_ctrl, text="Reset", command=_reset_all).grid(row=6, column=0, sticky="w", pady=(6, 0))
 
         while viewer.is_running():
             # Pump Tk UI
