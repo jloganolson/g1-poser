@@ -1111,6 +1111,268 @@ if __name__ == "__main__":
         ttk.Button(global_ctrl, text="Import…", command=_on_import).grid(row=6, column=1, sticky="w", pady=(6, 0), padx=(8, 0))
         ttk.Button(global_ctrl, text="Export", command=_on_export).grid(row=6, column=2, sticky="w", pady=(6, 0), padx=(8, 0))
 
+        def _on_export_animation() -> None:
+            try:
+                # Snapshot current UI parameters
+                T = float(global_ctrl.cycle_T.get())
+                gap = float(global_ctrl.phase_gap.get())
+                duty = float(global_ctrl.duty.get())
+                torso_fwd_speed = float(tv_speed.get())
+
+                target_fps = 200.0
+                if T <= 1e-6:
+                    T = 1e-6
+                num_steps = max(2, int(round(T * target_fps)))
+                dt = T / float(num_steps)
+                total_steps = 3 * num_steps  # export three full cycles
+
+                # Snapshot leg UI
+                ui_snap = {}
+                for leg_name, ui_ctrl in {
+                    "FL": fl,
+                    "FR": fr,
+                    "RL": rl,
+                    "RR": rr,
+                }.items():
+                    (plant_x, plant_y), (lift_x, lift_y) = ui_ctrl.get_endpoints()
+                    ui_snap[leg_name] = {
+                        "plant_x": float(plant_x),
+                        "plant_y": float(plant_y),
+                        "lift_x": float(lift_x),
+                        "lift_y": float(lift_y),
+                        "base_z": float(ui_ctrl.base_z),
+                        "lift_h": float(ui_ctrl.get_lift_height()),
+                    }
+
+                # Offline configuration to avoid disturbing the live viewer
+                offline_cfg = mink.Configuration(model)
+                offline_cfg.data.qpos[:] = configuration.data.qpos[:]
+                mujoco.mj_forward(offline_cfg.model, offline_cfg.data)
+
+                # Initialize task targets from this offline configuration
+                posture_task.set_target_from_configuration(offline_cfg)
+                pelvis_orientation_task.set_target_from_configuration(offline_cfg)
+                pelvis_position_task.set_target_from_configuration(offline_cfg)
+                torso_orientation_task.set_target_from_configuration(offline_cfg)
+                left_foot_orientation_task.set_target_from_configuration(offline_cfg)
+                right_foot_orientation_task.set_target_from_configuration(offline_cfg)
+                left_knee_orientation_task.set_target_from_configuration(offline_cfg)
+                right_knee_orientation_task.set_target_from_configuration(offline_cfg)
+                left_elbow_orientation_task.set_target_from_configuration(offline_cfg)
+                right_elbow_orientation_task.set_target_from_configuration(offline_cfg)
+
+                d_off = offline_cfg.data
+
+                # Helpers
+                def _smoothstep(u: float) -> float:
+                    u = 0.0 if u < 0.0 else (1.0 if u > 1.0 else u)
+                    return u * u * (3.0 - 2.0 * u)
+
+                phase_offsets = {"FL": 0.0, "RR": gap, "FR": 2.0 * gap, "RL": 3.0 * gap}
+
+                # Pelvis id and free-joint base
+                try:
+                    pelvis_bid = mujoco.mj_name2id(offline_cfg.model, mujoco.mjtObj.mjOBJ_BODY, "pelvis")
+                except Exception:
+                    pelvis_bid = -1
+
+                free_qpos_addr = None
+                for j in range(offline_cfg.model.njnt):
+                    if int(offline_cfg.model.jnt_type[j]) == 0:
+                        free_qpos_addr = int(offline_cfg.model.jnt_qposadr[j])
+                        break
+
+                base_xyz0 = None
+                if free_qpos_addr is not None:
+                    base_xyz0 = (
+                        float(d_off.qpos[free_qpos_addr + 0]),
+                        float(d_off.qpos[free_qpos_addr + 1]),
+                        float(d_off.qpos[free_qpos_addr + 2]),
+                    )
+
+                # Initialize per-leg world-anchored state at t=0 similar to runtime reset
+                pelvis_x0 = float(d_off.xpos[pelvis_bid][0]) if pelvis_bid != -1 else 0.0
+                pelvis_y0 = float(d_off.xpos[pelvis_bid][1]) if pelvis_bid != -1 else 0.0
+                LEG_STATE = {}
+                for leg in ("FL", "RR", "FR", "RL"):
+                    s = ui_snap[leg]
+                    plant_x = s["plant_x"]
+                    plant_y = s["plant_y"]
+                    lift_x = s["lift_x"]
+                    lift_y = s["lift_y"]
+                    phi0 = phase_offsets[leg] - math.floor(phase_offsets[leg])
+                    in_stance0 = bool(phi0 < duty)
+                    contact_w0 = (pelvis_x0 + float(plant_x), pelvis_y0 + float(plant_y))
+                    target_w0 = (pelvis_x0 + float(lift_x), pelvis_y0 + float(lift_y))
+                    LEG_STATE[leg] = {
+                        "contact_w": contact_w0,
+                        "target_w": target_w0,
+                        "in_stance": in_stance0,
+                    }
+
+                frames = []
+                local_solver = "daqp"
+                s_forward = 0.0
+
+                for k in range(total_steps):
+                    t_local = float(k) * dt
+
+                    # Advance pelvis base forward if a free joint exists
+                    if base_xyz0 is not None and free_qpos_addr is not None:
+                        s_forward += torso_fwd_speed * dt
+                        d_off.qpos[free_qpos_addr + 0] = base_xyz0[0] + s_forward
+                        d_off.qpos[free_qpos_addr + 1] = base_xyz0[1]
+                        d_off.qpos[free_qpos_addr + 2] = base_xyz0[2]
+                        mujoco.mj_forward(offline_cfg.model, d_off)
+                        # Keep pelvis/torso orientation/position tasks following the moved base
+                        pelvis_orientation_task.set_target_from_configuration(offline_cfg)
+                        pelvis_position_task.set_target_from_configuration(offline_cfg)
+                        torso_orientation_task.set_target_from_configuration(offline_cfg)
+
+                    # Current pelvis world position
+                    pelvis_x = float(d_off.xpos[pelvis_bid][0]) if pelvis_bid != -1 else 0.0
+                    pelvis_y = float(d_off.xpos[pelvis_bid][1]) if pelvis_bid != -1 else 0.0
+
+                    for leg, mid in ("FL", left_palm_mid), ("RR", right_foot_mid), ("FR", right_palm_mid), ("RL", left_foot_mid):
+                        s = ui_snap[leg]
+                        plant_x = s["plant_x"]
+                        plant_y = s["plant_y"]
+                        lift_x = s["lift_x"]
+                        lift_y = s["lift_y"]
+                        base_z = s["base_z"]
+                        lift_h = s["lift_h"]
+
+                        phi_total = t_local / T + float(phase_offsets[leg])
+                        phi = phi_total - math.floor(phi_total)
+                        stance_now = bool(phi < duty)
+
+                        state = LEG_STATE[leg]
+                        # Transitions
+                        if bool(state["in_stance"]) and not stance_now:
+                            state["target_w"] = (pelvis_x + float(lift_x), pelvis_y + float(lift_y))
+                        elif (not bool(state["in_stance"])) and stance_now:
+                            state["contact_w"] = tuple(state["target_w"])  # type: ignore[arg-type]
+                        state["in_stance"] = stance_now
+
+                        contact_w = tuple(state["contact_w"])  # type: ignore[arg-type]
+                        target_w = tuple(state["target_w"])    # type: ignore[arg-type]
+
+                        if stance_now:
+                            tx = float(contact_w[0])
+                            ty = float(contact_w[1])
+                            tz = float(base_z)
+                        else:
+                            sphi = (phi - duty) / max(1e-6, (1.0 - duty))
+                            ssm = _smoothstep(sphi)
+                            tx = (1.0 - ssm) * float(contact_w[0]) + ssm * float(target_w[0])
+                            ty = (1.0 - ssm) * float(contact_w[1]) + ssm * float(target_w[1])
+                            tz = float(base_z) + float(lift_h) * math.sin(math.pi * sphi)
+
+                        d_off.mocap_pos[mid][0] = float(tx)
+                        d_off.mocap_pos[mid][1] = float(ty)
+                        d_off.mocap_pos[mid][2] = float(tz)
+
+                    # Update IK targets from mocap and solve
+                    right_hand_task.set_target(mink.SE3.from_mocap_id(d_off, right_palm_mid))
+                    left_hand_task.set_target(mink.SE3.from_mocap_id(d_off, left_palm_mid))
+                    left_foot_task.set_target(mink.SE3.from_mocap_id(d_off, left_foot_mid))
+                    right_foot_task.set_target(mink.SE3.from_mocap_id(d_off, right_foot_mid))
+
+                    vel = mink.solve_ik(offline_cfg, tasks, dt, local_solver, 1e-1, limits=limits)
+                    offline_cfg.integrate_inplace(vel, dt)
+
+                    frames.append([float(x) for x in d_off.qpos])
+
+                # Build metadata similar to mink_g1_pose_ik.py
+                base_meta = None
+                try:
+                    free_qpos_addr2 = None
+                    for j in range(model.njnt):
+                        if int(model.jnt_type[j]) == 0:
+                            free_qpos_addr2 = int(model.jnt_qposadr[j])
+                            break
+                    if free_qpos_addr2 is not None:
+                        base_meta = {
+                            "pos_indices": [free_qpos_addr2 + i for i in range(3)],
+                            "quat_indices": [free_qpos_addr2 + 3 + i for i in range(4)],
+                        }
+                except Exception:
+                    pass
+
+                joints_meta = []
+                qpos_labels = [f"qpos[{i}]" for i in range(model.nq)]
+
+                def _set_label(i: int, name: str) -> None:
+                    if 0 <= i < len(qpos_labels):
+                        qpos_labels[i] = name
+
+                for j in range(model.njnt):
+                    try:
+                        jtype = int(model.jnt_type[j])
+                        qadr = int(model.jnt_qposadr[j])
+                        name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, j) or f"joint_{j}"
+                        if jtype == 0:
+                            jtypestr = "free"
+                            qdim = 7
+                        elif jtype == 1:
+                            jtypestr = "ball"
+                            qdim = 4
+                            _set_label(qadr + 0, f"ball:{name}:w")
+                            _set_label(qadr + 1, f"ball:{name}:x")
+                            _set_label(qadr + 2, f"ball:{name}:y")
+                            _set_label(qadr + 3, f"ball:{name}:z")
+                        elif jtype == 2:
+                            jtypestr = "slide"
+                            qdim = 1
+                            _set_label(qadr + 0, f"joint:{name}")
+                        else:
+                            jtypestr = "hinge"
+                            qdim = 1
+                            _set_label(qadr + 0, f"joint:{name}")
+                        joints_meta.append({
+                            "name": str(name),
+                            "type": jtypestr,
+                            "qposadr": int(qadr),
+                            "qposdim": int(qdim),
+                        })
+                    except Exception:
+                        pass
+
+                fps = 1.0 / float(dt)
+                serial = {
+                    "schema": "gait_animation.v1",
+                    "model_xml": str(_XML),
+                    "dt": float(dt),
+                    "fps": float(fps),
+                    "nq": int(model.nq),
+                    "frames": frames,
+                    "cycles": 3,
+                    "cycle_T": float(T),
+                    "timestamp": datetime.now().isoformat(),
+                    "metadata": {
+                        "base": base_meta,
+                        "joints": joints_meta,
+                        "qpos_labels": qpos_labels,
+                    },
+                }
+
+                _OUT_DIR.mkdir(parents=True, exist_ok=True)
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                path = _OUT_DIR / f"animation_{ts}.json"
+                path.write_text(json.dumps(serial))
+
+                try:
+                    messagebox.showinfo("Export Animation", f"Saved animation to {path.name} ({len(frames)} frames, 3 cycles)")
+                except Exception:
+                    pass
+            except Exception as e:
+                try:
+                    messagebox.showerror("Export Animation failed", str(e))
+                except Exception:
+                    pass
+
+        ttk.Button(global_ctrl, text="Export Animation", command=_on_export_animation).grid(row=6, column=3, sticky="w", pady=(6, 0), padx=(8, 0))
+
         while viewer.is_running():
             # Pump Tk UI
             try:

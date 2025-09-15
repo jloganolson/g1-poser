@@ -112,6 +112,18 @@ def main() -> int:
 
     with mujoco.viewer.launch_passive(model=model, data=data, show_left_ui=False, show_right_ui=False) as viewer:
         mujoco.mjv_defaultFreeCamera(model, viewer.cam)
+        # Try to track the pelvis body if present for forward-motion animations
+        try:
+            pelvis_bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "pelvis")
+        except Exception:
+            pelvis_bid = -1
+        try:
+            if pelvis_bid != -1:
+                viewer.cam.type = mujoco.mjtCamera.mjCAMERA_TRACKING
+                viewer.cam.trackbodyid = int(pelvis_bid)
+                viewer.cam.fixedcamid = -1
+        except Exception:
+            pass
         total = len(frames)
         t_capture = 0.0
         t0 = time.perf_counter()
@@ -181,6 +193,15 @@ def main() -> int:
             for j in range(model.nq):
                 data.qpos[j] = float(qpos_interp[j])
             mujoco.mj_forward(model, data)
+
+            # Keep camera centered on pelvis if available
+            try:
+                if pelvis_bid != -1:
+                    viewer.cam.lookat[0] = float(data.xpos[pelvis_bid][0])
+                    viewer.cam.lookat[1] = float(data.xpos[pelvis_bid][1])
+                    viewer.cam.lookat[2] = float(data.xpos[pelvis_bid][2])
+            except Exception:
+                pass
 
             viewer.sync()
 
