@@ -9,6 +9,8 @@ import math
 
 import mujoco
 import mujoco.viewer
+import tkinter as tk
+from tkinter import ttk
 
 
 def _normalize_quat(q: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
@@ -137,6 +139,50 @@ def main() -> int:
     present_dt = 1.0 / max(1e-6, float(args.fps))
     speed = max(1e-6, float(args.speed))
 
+    # --- Minimal Tk UI: Loop toggle and Reset button (no Entry widgets) ---
+    root = tk.Tk()
+    root.title("Animation Playback (Physics)")
+    ui = ttk.Frame(root, padding=8)
+    ui.pack(fill="x")
+    tv_loop = tk.BooleanVar(value=bool(args.loop))
+
+    # Timing accumulators live outside so Reset can touch them
+    total = len(frames)
+    t_capture = 0.0
+    last_wall = time.perf_counter()
+    last_present = last_wall
+    phys_accum = 0.0
+
+    def _do_reset(*_a) -> None:
+        nonlocal t_capture, last_wall, last_present, phys_accum
+        try:
+            # Reapply first frame state, zero velocities and controls
+            f0_local = frames[0]
+            for j in range(model.nq):
+                data.qpos[j] = float(f0_local[j])
+            for j in range(model.nv):
+                data.qvel[j] = 0.0
+            for i in range(model.nu):
+                data.ctrl[i] = 0.0
+            mujoco.mj_forward(model, data)
+            # Reset playback clocks
+            t_capture = 0.0
+            phys_accum = 0.0
+            now = time.perf_counter()
+            last_wall = now
+            last_present = now
+            print("[reset] Rewound to first frame and zeroed velocities.")
+        except Exception:
+            pass
+
+    ttk.Checkbutton(ui, text="Loop", variable=tv_loop).pack(side="left")
+    ttk.Button(ui, text="Reset (r)", command=_do_reset).pack(side="left", padx=(8, 0))
+    try:
+        root.bind("r", _do_reset)
+        root.bind("R", _do_reset)
+    except Exception:
+        pass
+
     with mujoco.viewer.launch_passive(model=model, data=data, show_left_ui=False, show_right_ui=False) as viewer:
         mujoco.mjv_defaultFreeCamera(model, viewer.cam)
         try:
@@ -152,17 +198,19 @@ def main() -> int:
         except Exception:
             pass
 
-        total = len(frames)
-        t_capture = 0.0
-        last_wall = time.perf_counter()
-        last_present = last_wall
-        phys_accum = 0.0
-
         # Print one-time info
         print(f"Loaded animation: {anim_path.name} ({total} frames @ {1.0/dt_capture:.1f} fps capture) | Model nq={model.nq}")
         print(f"Driving {len(joint_to_actuator)} joints via actuators; base and other DoFs evolve by physics.")
 
         while viewer.is_running():
+            # Process UI events
+            try:
+                root.update_idletasks()
+                root.update()
+            except tk.TclError:
+                # UI closed -> stop playback
+                break
+
             now = time.perf_counter()
             dt_wall = now - last_wall
             last_wall = now
@@ -175,7 +223,7 @@ def main() -> int:
 
                 # Compute frame indices and interpolation factor
                 u = t_capture / dt_capture
-                if args.loop:
+                if bool(tv_loop.get()):
                     i0 = int(math.floor(u)) % total
                     alpha = u - math.floor(u)
                     i1 = (i0 + 1) % total
