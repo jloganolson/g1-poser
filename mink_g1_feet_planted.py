@@ -159,19 +159,11 @@ if __name__ == "__main__":
     panel.pack(fill="x")
 
     tv_speed = tk.DoubleVar(value=0.10)     # torso_fwd_speed (m/s)
-    tv_bias = tk.DoubleVar(value=0.00)      # forward_bias (m)
-    tv_period = tk.DoubleVar(value=1.20)    # step_period (s)
-    tv_swing_frac = tk.DoubleVar(value=0.45) # swing_fraction
-    tv_height = tk.DoubleVar(value=0.06)    # swing_height (m)
     tv_cam_az = tk.DoubleVar(value=137.368)   # camera azimuth in degrees
     tv_cam_el = tk.DoubleVar(value=-16.395)   # camera elevation in degrees (negative looks down)
     tv_cam_dist = tk.DoubleVar(value=2.355)   # camera distance (m)
 
     add_scale(panel, "Torso speed (m/s)", tv_speed, 0.0, 0.40)
-    add_scale(panel, "Forward bias (m)", tv_bias, -0.05, 0.10)
-    add_scale(panel, "Step period (s)", tv_period, 0.40, 2.00)
-    add_scale(panel, "Swing fraction", tv_swing_frac, 0.20, 0.80)
-    add_scale(panel, "Swing height (m)", tv_height, 0.00, 0.12)
     add_scale(panel, "Camera azimuth (deg)", tv_cam_az, -180.0, 180.0)
     add_scale(panel, "Camera elevation (deg)", tv_cam_el, -89.0, 89.0)
     add_scale(panel, "Camera distance (m)", tv_cam_dist, 0.5, 5.0)
@@ -689,17 +681,12 @@ if __name__ == "__main__":
 
         # Procedural crawl gait parameters (initial; will be updated live from UI)
         torso_fwd_speed = float(tv_speed.get())
-        forward_bias = float(tv_bias.get())
-        step_period = float(tv_period.get())
-        swing_fraction = float(tv_swing_frac.get())
-        swing_height = float(tv_height.get())
 
         # Gait state
         s_forward = 0.0
         gait_time = 0.0
         last_step_index = 0
         pair = 0  # 0: swing (right hand + left foot), 1: swing (left hand + right foot)
-        swing_duration = swing_fraction * step_period
 
         # Resolve pelvis body id after viewer starts and compute initial offsets
         pelvis_bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "pelvis")
@@ -811,6 +798,36 @@ if __name__ == "__main__":
             u = 0.0 if u < 0.0 else (1.0 if u > 1.0 else u)
             return u * u * (3.0 - 2.0 * u)
 
+        # Initialize per-leg world-anchored state
+        pelvis_x0, pelvis_y0 = pelvis_pos0[0], pelvis_pos0[1]
+        LEG_STATE: dict[str, dict[str, object]] = {}
+        # Initial duty parameters for stance determination at t=0
+        T0 = float(global_ctrl.cycle_T.get())
+        gap0 = float(global_ctrl.phase_gap.get())
+        duty0 = float(global_ctrl.duty.get())
+        if T0 <= 1e-6:
+            T0 = 1e-6
+        phase_offsets0 = {"FL": 0.0, "RR": gap0, "FR": 2.0 * gap0, "RL": 3.0 * gap0}
+
+        base_xy = {
+            "FL": (base_left_hand[0], base_left_hand[1]),
+            "FR": (base_right_hand[0], base_right_hand[1]),
+            "RL": (base_left_foot[0], base_left_foot[1]),
+            "RR": (base_right_foot[0], base_right_foot[1]),
+        }
+
+        for leg in LEG_ORDER:
+            ui = LEG_TO_UI[leg]
+            (_, _), (lift_x, lift_y) = ui.get_endpoints()
+            target_w0 = (pelvis_x0 + float(lift_x), pelvis_y0 + float(lift_y))
+            phi0 = phase_offsets0[leg] - math.floor(phase_offsets0[leg])
+            in_stance0 = bool(phi0 < duty0)
+            LEG_STATE[leg] = {
+                "contact_w": base_xy[leg],
+                "target_w": target_w0,
+                "in_stance": in_stance0,
+            }
+
         while viewer.is_running():
             # Pump Tk UI
             try:
@@ -821,10 +838,6 @@ if __name__ == "__main__":
 
             # Refresh parameters from UI each frame
             torso_fwd_speed = float(tv_speed.get())
-            forward_bias = float(tv_bias.get())
-            step_period = max(1e-3, float(tv_period.get()))
-            swing_fraction = min(0.95, max(0.05, float(tv_swing_frac.get())))
-            swing_height = max(0.0, float(tv_height.get()))
 
             gait_time += rate.dt
 
@@ -850,37 +863,44 @@ if __name__ == "__main__":
                 T = 1e-6
             phase_offsets = {"FL": 0.0, "RR": gap, "FR": 2.0 * gap, "RL": 3.0 * gap}
 
-            # Current pelvis world position for pelvis-relative endpoint conversion
+            # Current pelvis world position
             pelvis_x = float(data.xpos[pelvis_bid][0]) if pelvis_bid != -1 else 0.0
             pelvis_y = float(data.xpos[pelvis_bid][1]) if pelvis_bid != -1 else 0.0
 
             for leg in LEG_ORDER:
                 ui = LEG_TO_UI[leg]
                 mid = LEG_TO_MID[leg]
+                state = LEG_STATE[leg]
                 (plant_x, plant_y), (lift_x, lift_y) = ui.get_endpoints()
                 base_z = ui.base_z
                 lift_h = ui.get_lift_height()
 
                 phi_total = t_sim / T + float(phase_offsets[leg])
                 phi = phi_total - math.floor(phi_total)
+                stance_now = bool(phi < duty)
 
-                # Convert pelvis-relative endpoints to world using current pelvis xy and forward bias
-                plant_x_w = pelvis_x + forward_bias + plant_x
-                plant_y_w = pelvis_y + plant_y
-                lift_x_w = pelvis_x + forward_bias + lift_x
-                lift_y_w = pelvis_y + lift_y
+                # Transitions
+                if bool(state["in_stance"]) and not stance_now:
+                    # Entering swing: freeze a world target ahead based on current pelvis and UI lift
+                    state["target_w"] = (pelvis_x + float(lift_x), pelvis_y + float(lift_y))
+                elif (not bool(state["in_stance"])) and stance_now:
+                    # Entering stance: lock contact at the previously set target
+                    state["contact_w"] = tuple(state["target_w"])  # type: ignore[arg-type]
 
-                if phi < duty:
-                    s = phi / max(1e-6, duty)
-                    s_smooth = _smoothstep(s)
-                    tx = (1.0 - s_smooth) * lift_x_w + s_smooth * plant_x_w
-                    ty = (1.0 - s_smooth) * lift_y_w + s_smooth * plant_y_w
+                state["in_stance"] = stance_now
+
+                contact_w = tuple(state["contact_w"])  # type: ignore[arg-type]
+                target_w = tuple(state["target_w"])    # type: ignore[arg-type]
+
+                if stance_now:
+                    tx = float(contact_w[0])
+                    ty = float(contact_w[1])
                     tz = base_z
                 else:
                     s = (phi - duty) / max(1e-6, (1.0 - duty))
                     s_smooth = _smoothstep(s)
-                    tx = (1.0 - s_smooth) * plant_x_w + s_smooth * lift_x_w
-                    ty = (1.0 - s_smooth) * plant_y_w + s_smooth * lift_y_w
+                    tx = (1.0 - s_smooth) * float(contact_w[0]) + s_smooth * float(target_w[0])
+                    ty = (1.0 - s_smooth) * float(contact_w[1]) + s_smooth * float(target_w[1])
                     tz = base_z + lift_h * math.sin(math.pi * s)
 
                 data.mocap_pos[mid][0] = float(tx)
