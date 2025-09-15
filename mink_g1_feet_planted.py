@@ -180,6 +180,112 @@ if __name__ == "__main__":
     add_scale(panel, "Camera elevation (deg)", tv_cam_el, -89.0, 89.0)
     add_scale(panel, "Camera distance (m)", tv_cam_dist, 0.5, 5.0)
 
+    # ---- Minimal 2D Foot Placement UI (front/rear with symmetry) ----
+    class XYPad(ttk.Frame):
+        def __init__(
+            self,
+            parent: tk.Misc,
+            var_x: tk.DoubleVar,
+            var_y: tk.DoubleVar,
+            x_center: float,
+            y_center: float,
+            x_half_range: float,
+            y_half_range: float,
+            width: int = 180,
+            height: int = 180,
+            title: str | None = None,
+        ) -> None:
+            super().__init__(parent, padding=4)
+            self.var_x = var_x
+            self.var_y = var_y
+            self.x_center = float(x_center)
+            self.y_center = float(y_center)
+            self.x_half = float(x_half_range)
+            self.y_half = float(y_half_range)
+            self.w = int(width)
+            self.h = int(height)
+
+            if title:
+                ttk.Label(self, text=title, font=("TkDefaultFont", 10, "bold")).pack(anchor="w")
+
+            self.canvas = tk.Canvas(self, width=self.w, height=self.h, bg="white", highlightthickness=1, highlightbackground="#ccc")
+            self.canvas.pack(fill="both", expand=True)
+
+            # Draw bounds and crosshair
+            self.canvas.create_rectangle(2, 2, self.w - 2, self.h - 2, outline="#aaa")
+            self.canvas.create_line(self.w // 2, 0, self.w // 2, self.h, fill="#eee")
+            self.canvas.create_line(0, self.h // 2, self.w, self.h // 2, fill="#eee")
+
+            self.handle = self.canvas.create_oval(0, 0, 0, 0, fill="#3a7", outline="")
+            self._active = False
+
+            def _to_canvas_coords(x_world: float, y_world: float) -> tuple[float, float]:
+                u_y = (y_world - self.y_center) / self.y_half
+                v_x = (x_world - self.x_center) / self.x_half
+                cx = (-u_y * 0.5 + 0.5) * self.w
+                cy = (-v_x * 0.5 + 0.5) * self.h
+                return cx, cy
+
+            def _to_world_coords(cx: float, cy: float) -> tuple[float, float]:
+                u = (cx / self.w - 0.5) * 2.0
+                v = (cy / self.h - 0.5) * 2.0
+                xw = self.x_center - max(-1.0, min(1.0, v)) * self.x_half
+                yw = self.y_center - max(-1.0, min(1.0, u)) * self.y_half
+                return xw, yw
+
+            self._to_canvas_coords = _to_canvas_coords  # type: ignore[attr-defined]
+            self._to_world_coords = _to_world_coords    # type: ignore[attr-defined]
+
+            def _redraw(*_a) -> None:
+                r = 6
+                cx, cy = self._to_canvas_coords(float(self.var_x.get()), float(self.var_y.get()))
+                self.canvas.coords(self.handle, cx - r, cy - r, cx + r, cy + r)
+
+            def _on_press(evt) -> None:  # type: ignore[no-redef]
+                self._active = True
+                _on_drag(evt)
+
+            def _on_drag(evt) -> None:  # type: ignore[no-redef]
+                if not self._active:
+                    return
+                cx = max(0, min(self.w, evt.x))
+                cy = max(0, min(self.h, evt.y))
+                xw, yw = self._to_world_coords(cx, cy)
+                self.var_x.set(xw)
+                self.var_y.set(yw)
+
+            def _on_release(_evt) -> None:
+                self._active = False
+
+            self.canvas.bind("<Button-1>", _on_press)
+            self.canvas.bind("<B1-Motion>", _on_drag)
+            self.canvas.bind("<ButtonRelease-1>", _on_release)
+
+            self.var_x.trace_add("write", _redraw)
+            self.var_y.trace_add("write", _redraw)
+            _redraw()
+
+    placement = ttk.LabelFrame(root, text="Foot placement (pelvis-relative, symmetric)", padding=8)
+    placement.pack(fill="x", padx=8, pady=(6, 8))
+
+    # Vars for front (hands) and rear (feet) offsets; initialized later after pelvis offsets computed
+    front_x = tk.DoubleVar(value=0.0)
+    front_y = tk.DoubleVar(value=0.0)
+    rear_x = tk.DoubleVar(value=0.0)
+    rear_y = tk.DoubleVar(value=0.0)
+    front_sym = tk.BooleanVar(value=True)
+    rear_sym = tk.BooleanVar(value=True)
+
+    row = ttk.Frame(placement)
+    row.pack(fill="x")
+    XYPad(row, front_x, front_y, x_center=0.0, y_center=0.0, x_half_range=0.6, y_half_range=0.6, width=200, height=200, title="Front (hands)").pack(side="left", padx=(0, 8))
+    XYPad(row, rear_x, rear_y, x_center=0.0, y_center=0.0, x_half_range=0.6, y_half_range=0.6, width=200, height=200, title="Rear (feet)").pack(side="left")
+
+    toggles = ttk.Frame(placement)
+    toggles.pack(fill="x", pady=(6, 0))
+    ttk.Checkbutton(toggles, text="Front symmetry (L ↔ R)", variable=front_sym).pack(side="left")
+    ttk.Checkbutton(toggles, text="Rear symmetry (L ↔ R)", variable=rear_sym).pack(side="left", padx=(12, 0))
+
     # IK tasks mirroring mink_g1_pose_ik.py
     tasks = [
         # Pelvis stability
@@ -413,6 +519,32 @@ if __name__ == "__main__":
         des_off_LF = [base_left_foot[0] - pelvis_pos0[0], base_left_foot[1] - pelvis_pos0[1]]
         des_off_RF = [base_right_foot[0] - pelvis_pos0[0], base_right_foot[1] - pelvis_pos0[1]]
 
+        # Baseline offsets captured at startup; UI deltas apply on top of these
+        base_off_LH = [des_off_LH[0], des_off_LH[1]]
+        base_off_RH = [des_off_RH[0], des_off_RH[1]]
+        base_off_LF = [des_off_LF[0], des_off_LF[1]]
+        base_off_RF = [des_off_RF[0], des_off_RF[1]]
+
+        # Determine correct mirror sign for Y based on initial offsets
+        # If left/right Y have opposite signs (usual), mirror factor is -1; otherwise +1
+        try:
+            mirror_front_sign = -1.0 if (des_off_LH[1] * des_off_RH[1]) < 0.0 else 1.0
+        except Exception:
+            mirror_front_sign = -1.0
+        try:
+            mirror_rear_sign = -1.0 if (des_off_LF[1] * des_off_RF[1]) < 0.0 else 1.0
+        except Exception:
+            mirror_rear_sign = -1.0
+
+        # Initialize placement UI to center (0,0)
+        try:
+            front_x.set(0.0)
+            front_y.set(0.0)
+            rear_x.set(0.0)
+            rear_y.set(0.0)
+        except Exception:
+            pass
+
         # Initialize first swing starts/targets using pelvis-relative offsets
         swing_start_RH = base_right_hand
         swing_start_LF = base_left_foot
@@ -509,6 +641,34 @@ if __name__ == "__main__":
             swing_duration = swing_fraction * step_period
             phase_time = gait_time - (step_index * step_period)
             phi = min(1.0, max(0.0, phase_time / max(1e-6, swing_duration)))
+
+            # Update pelvis-relative desired offsets from UI (apply L↔R symmetry per pair)
+            try:
+                fx = float(front_x.get())
+                fy = float(front_y.get())
+                rx = float(rear_x.get())
+                ry = float(rear_y.get())
+            except Exception:
+                fx = des_off_LH[0]
+                fy = des_off_LH[1]
+                rx = des_off_LF[0]
+                ry = des_off_LF[1]
+
+            if bool(front_sym.get()):
+                des_off_LH = [base_off_LH[0] + fx, base_off_LH[1] + fy]
+                des_off_RH = [base_off_RH[0] + fx, base_off_RH[1] + (mirror_front_sign * fy)]
+            else:
+                # Update only left-hand offset; preserve current right-hand offset
+                des_off_LH = [base_off_LH[0] + fx, base_off_LH[1] + fy]
+                des_off_RH = [base_off_RH[0], base_off_RH[1]]
+
+            if bool(rear_sym.get()):
+                des_off_LF = [base_off_LF[0] + rx, base_off_LF[1] + ry]
+                des_off_RF = [base_off_RF[0] + rx, base_off_RF[1] + (mirror_rear_sign * ry)]
+            else:
+                # Update only left-foot offset; preserve current right-foot offset
+                des_off_LF = [base_off_LF[0] + rx, base_off_LF[1] + ry]
+                des_off_RF = [base_off_RF[0], base_off_RF[1]]
 
             # Set mocap targets for stance limbs (remain planted)
             if pair == 0:
