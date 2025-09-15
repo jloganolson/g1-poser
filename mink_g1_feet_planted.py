@@ -9,6 +9,8 @@ import mujoco.viewer
 from loop_rate_limiters import RateLimiter
 
 import mink
+import tkinter as tk
+from tkinter import ttk
 
 
 _HERE = Path(__file__).parent
@@ -132,6 +134,51 @@ if __name__ == "__main__":
     configuration = mink.Configuration(model)
     configuration.data.qpos[:] = data.qpos
     mujoco.mj_forward(configuration.model, configuration.data)
+
+    # ---- Lightweight Tk UI for gait tuning (no Entry widgets) ----
+    root = tk.Tk()
+    root.title("Crawl Gait Tuning")
+
+    def add_scale(parent, label: str, var: tk.DoubleVar, lo: float, hi: float, resolution: float = 0.001) -> None:
+        row = ttk.Frame(parent)
+        row.pack(fill="x", padx=8, pady=4)
+        ttk.Label(row, text=label, width=22).pack(side="left")
+        val_label = ttk.Label(row, width=8, anchor="e")
+        val_label.pack(side="right")
+        def _update_label(*_args):
+            try:
+                val_label.configure(text=f"{float(var.get()):.3f}")
+            except Exception:
+                pass
+        var.trace_add("write", _update_label)
+        _update_label()
+        s = ttk.Scale(row, from_=lo, to=hi, variable=var, orient="horizontal", length=260)
+        s.pack(side="left", fill="x", expand=True, padx=8)
+
+    panel = ttk.LabelFrame(root, text="Parameters", padding=8)
+    panel.pack(fill="x")
+
+    tv_speed = tk.DoubleVar(value=0.10)     # torso_fwd_speed (m/s)
+    tv_bias = tk.DoubleVar(value=0.00)      # forward_bias (m)
+    tv_period = tk.DoubleVar(value=1.20)    # step_period (s)
+    tv_swing_frac = tk.DoubleVar(value=0.45) # swing_fraction
+    tv_height = tk.DoubleVar(value=0.06)    # swing_height (m)
+    tv_wiggle_amp = tk.DoubleVar(value=0.03) # wiggle amplitude (m)
+    tv_wiggle_freq = tk.DoubleVar(value=0.30) # wiggle frequency (Hz)
+    tv_cam_az = tk.DoubleVar(value=137.368)   # camera azimuth in degrees
+    tv_cam_el = tk.DoubleVar(value=-16.395)   # camera elevation in degrees (negative looks down)
+    tv_cam_dist = tk.DoubleVar(value=2.355)   # camera distance (m)
+
+    add_scale(panel, "Torso speed (m/s)", tv_speed, 0.0, 0.40)
+    add_scale(panel, "Forward bias (m)", tv_bias, -0.05, 0.10)
+    add_scale(panel, "Step period (s)", tv_period, 0.40, 2.00)
+    add_scale(panel, "Swing fraction", tv_swing_frac, 0.20, 0.80)
+    add_scale(panel, "Swing height (m)", tv_height, 0.00, 0.12)
+    add_scale(panel, "Wiggle amplitude (m)", tv_wiggle_amp, 0.00, 0.08)
+    add_scale(panel, "Wiggle frequency (Hz)", tv_wiggle_freq, 0.00, 1.00)
+    add_scale(panel, "Camera azimuth (deg)", tv_cam_az, -180.0, 180.0)
+    add_scale(panel, "Camera elevation (deg)", tv_cam_el, -89.0, 89.0)
+    add_scale(panel, "Camera distance (m)", tv_cam_dist, 0.5, 5.0)
 
     # IK tasks mirroring mink_g1_pose_ik.py
     tasks = [
@@ -291,6 +338,23 @@ if __name__ == "__main__":
     solver = "daqp"
     with mujoco.viewer.launch_passive(model=model, data=data, show_left_ui=False, show_right_ui=False) as viewer:
         mujoco.mjv_defaultFreeCamera(model, viewer.cam)
+        # Camera follow: track the pelvis body
+        try:
+            pelvis_bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "pelvis")
+        except Exception:
+            pelvis_bid = -1
+        try:
+            if pelvis_bid != -1:
+                viewer.cam.type = mujoco.mjtCamera.mjCAMERA_TRACKING
+                viewer.cam.trackbodyid = int(pelvis_bid)
+                viewer.cam.fixedcamid = -1
+                # Initialize camera parameters
+                viewer.cam.lookat[:] = data.xpos[pelvis_bid]
+                viewer.cam.azimuth = float(tv_cam_az.get())
+                viewer.cam.elevation = float(tv_cam_el.get())
+                viewer.cam.distance = float(tv_cam_dist.get())
+        except Exception:
+            pass
 
         # Set targets from the current configuration
         posture_task.set_target_from_configuration(configuration)
@@ -321,12 +385,12 @@ if __name__ == "__main__":
                 float(configuration.data.qpos[free_qpos_addr + 2]),
             )
 
-        # Procedural crawl gait parameters
-        torso_fwd_speed = 0.10  # m/s constant forward base translation along +x
-        forward_bias = 0.00     # optional forward bias beyond neutral pelvis-relative replant
-        step_period = 1.20      # s per diagonal pair cycle
-        swing_fraction = 0.45   # fraction of period spent in swing
-        swing_height = 0.06     # m apex height of swing arc
+        # Procedural crawl gait parameters (initial; will be updated live from UI)
+        torso_fwd_speed = float(tv_speed.get())
+        forward_bias = float(tv_bias.get())
+        step_period = float(tv_period.get())
+        swing_fraction = float(tv_swing_frac.get())
+        swing_height = float(tv_height.get())
 
         # Gait state
         s_forward = 0.0
@@ -376,14 +440,28 @@ if __name__ == "__main__":
         )
 
         while viewer.is_running():
+            # Pump Tk UI
+            try:
+                root.update_idletasks()
+                root.update()
+            except Exception:
+                pass
+
+            # Refresh parameters from UI each frame
+            torso_fwd_speed = float(tv_speed.get())
+            forward_bias = float(tv_bias.get())
+            step_period = max(1e-3, float(tv_period.get()))
+            swing_fraction = min(0.95, max(0.05, float(tv_swing_frac.get())))
+            swing_height = max(0.0, float(tv_height.get()))
+
             t += rate.dt
             gait_time += rate.dt
 
             # Advance torso forward with gentle lateral wiggle
             if base_xyz0 is not None and free_qpos_addr is not None:
                 s_forward += torso_fwd_speed * rate.dt
-                amp_xy = 0.03
-                freq = 0.3
+                amp_xy = float(tv_wiggle_amp.get())
+                freq = float(tv_wiggle_freq.get())
                 dx = amp_xy * math.sin(2.0 * math.pi * freq * t)
                 dy = amp_xy * math.cos(2.0 * math.pi * freq * t)
                 configuration.data.qpos[free_qpos_addr + 0] = base_xyz0[0] + s_forward + dx
@@ -428,8 +506,9 @@ if __name__ == "__main__":
                     swing_target_RF = (pelvis_pos_start[0] + des_off_RF[0] + forward_bias, pelvis_pos_start[1] + des_off_RF[1], 0.0)
                 last_step_index = step_index
 
+            swing_duration = swing_fraction * step_period
             phase_time = gait_time - (step_index * step_period)
-            phi = min(1.0, max(0.0, phase_time / swing_duration))
+            phi = min(1.0, max(0.0, phase_time / max(1e-6, swing_duration)))
 
             # Set mocap targets for stance limbs (remain planted)
             if pair == 0:
@@ -464,6 +543,18 @@ if __name__ == "__main__":
             # Solve and integrate
             vel = mink.solve_ik(configuration, tasks, rate.dt, solver, 1e-1, limits=limits)
             configuration.integrate_inplace(vel, rate.dt)
+
+            # Keep camera centered on pelvis and apply orbit parameters
+            try:
+                if pelvis_bid != -1:
+                    viewer.cam.lookat[0] = float(data.xpos[pelvis_bid][0])
+                    viewer.cam.lookat[1] = float(data.xpos[pelvis_bid][1])
+                    viewer.cam.lookat[2] = float(data.xpos[pelvis_bid][2])
+                    viewer.cam.azimuth = float(tv_cam_az.get())
+                    viewer.cam.elevation = float(tv_cam_el.get())
+                    viewer.cam.distance = float(tv_cam_dist.get())
+            except Exception:
+                pass
 
             mujoco.mj_camlight(model, data)
             viewer.sync()
