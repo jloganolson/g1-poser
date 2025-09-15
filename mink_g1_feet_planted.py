@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 import math
 import json
+import shutil
+import subprocess
 
 import mujoco
 import mujoco.viewer
@@ -11,11 +13,14 @@ from loop_rate_limiters import RateLimiter
 import mink
 import tkinter as tk
 from tkinter import ttk
+from tkinter import messagebox
+from datetime import datetime
 
 
 _HERE = Path(__file__).parent
 _XML = _HERE / "g1_description" / "scene_g1_targets.xml"
 _POSES_JSON = _HERE / "crawl-pose.json"
+_OUT_DIR = _HERE / "output"
 
 
 def _rpy_to_quat(roll: float, pitch: float, yaw: float) -> tuple[float, float, float, float]:
@@ -485,6 +490,16 @@ if __name__ == "__main__":
             except Exception:
                 pass
 
+        def snapshot(self) -> dict:
+            return {
+                "cycle_T": float(self.cycle_T.get()),
+                "phase_gap": float(self.phase_gap.get()),
+                "duty": float(self.duty.get()),
+                "running": bool(self.running.get()),
+                "front_sym": bool(self.front_sym.get()),
+                "rear_sym": bool(self.rear_sym.get()),
+            }
+
     # IK tasks mirroring mink_g1_pose_ik.py
     tasks = [
         # Pelvis stability
@@ -920,6 +935,181 @@ if __name__ == "__main__":
                 pass
 
         ttk.Button(global_ctrl, text="Reset", command=_reset_all).grid(row=6, column=0, sticky="w", pady=(6, 0))
+
+        # --- JSON import/export helpers (no Entry widgets; prefer Zenity) ---
+        def _safe_open_json_path(parent, initialdir: Path) -> Path | None:
+            try:
+                zenity = shutil.which("zenity")
+                if zenity:
+                    cmd = [
+                        zenity,
+                        "--file-selection",
+                        "--title=Import Configuration",
+                        f"--filename={str(initialdir)}/",
+                        "--file-filter=JSON files | *.json *.JSON",
+                    ]
+                    proc = subprocess.run(cmd, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                    if proc.returncode == 0:
+                        selected = proc.stdout.strip()
+                        if selected:
+                            p = Path(selected)
+                            if p.exists():
+                                return p
+                    return None
+            except Exception:
+                pass
+
+            try:
+                messagebox.showerror("Import", "Zenity not available. Please install 'zenity' or provide a JSON path via CLI.")
+            except Exception:
+                pass
+            return None
+
+        def _snapshot_config() -> dict:
+            def leg_snapshot(ctrl: LegControl) -> dict:
+                (px, py), (lx, ly) = ctrl.get_endpoints()
+                return {
+                    "plant": [float(px), float(py)],
+                    "lift": [float(lx), float(ly)],
+                    "lift_h": float(ctrl.get_lift_height()),
+                    "base_z": float(ctrl.base_z),
+                }
+
+            return {
+                "schema": "gait_config.v1",
+                "timestamp": datetime.now().isoformat(),
+                "speed": float(tv_speed.get()),
+                "camera": {
+                    "azimuth": float(tv_cam_az.get()),
+                    "elevation": float(tv_cam_el.get()),
+                    "distance": float(tv_cam_dist.get()),
+                },
+                "global": global_ctrl.snapshot(),
+                "legs": {
+                    "FL": leg_snapshot(fl),
+                    "FR": leg_snapshot(fr),
+                    "RL": leg_snapshot(rl),
+                    "RR": leg_snapshot(rr),
+                },
+            }
+
+        def _apply_config(cfg: dict) -> None:
+            try:
+                # Temporarily disable symmetry to avoid feedback during set
+                old_front = bool(global_ctrl.front_sym.get())
+                old_rear = bool(global_ctrl.rear_sym.get())
+                global_ctrl.front_sym.set(False)
+                global_ctrl.rear_sym.set(False)
+
+                # Optional: speed and camera
+                try:
+                    if "speed" in cfg:
+                        tv_speed.set(float(cfg.get("speed", float(tv_speed.get()))))
+                    cam = cfg.get("camera", {}) or {}
+                    if isinstance(cam, dict):
+                        if "azimuth" in cam:
+                            tv_cam_az.set(float(cam.get("azimuth", float(tv_cam_az.get()))))
+                        if "elevation" in cam:
+                            tv_cam_el.set(float(cam.get("elevation", float(tv_cam_el.get()))))
+                        if "distance" in cam:
+                            tv_cam_dist.set(float(cam.get("distance", float(tv_cam_dist.get()))))
+                except Exception:
+                    pass
+
+                # Global gait
+                g = cfg.get("global", {}) or {}
+                try:
+                    if "cycle_T" in g:
+                        global_ctrl.cycle_T.set(float(g.get("cycle_T", float(global_ctrl.cycle_T.get()))))
+                    if "phase_gap" in g:
+                        global_ctrl.phase_gap.set(float(g.get("phase_gap", float(global_ctrl.phase_gap.get()))))
+                    if "duty" in g:
+                        global_ctrl.duty.set(float(g.get("duty", float(global_ctrl.duty.get()))))
+                    if "running" in g:
+                        global_ctrl.running.set(bool(g.get("running", bool(global_ctrl.running.get()))))
+                except Exception:
+                    pass
+
+                # Legs
+                legs = cfg.get("legs", {}) or {}
+
+                def set_leg(name: str, ctrl: LegControl) -> None:
+                    s = legs.get(name) or {}
+                    try:
+                        plant = s.get("plant")
+                        if isinstance(plant, (list, tuple)) and len(plant) == 2:
+                            ctrl.plant_x.set(float(plant[0]))
+                            ctrl.plant_y.set(float(plant[1]))
+                        lift = s.get("lift")
+                        if isinstance(lift, (list, tuple)) and len(lift) == 2:
+                            ctrl.lift_x.set(float(lift[0]))
+                            ctrl.lift_y.set(float(lift[1]))
+                        if "lift_h" in s:
+                            ctrl.lift_h.set(float(s.get("lift_h", ctrl.get_lift_height())))
+                        if "base_z" in s:
+                            ctrl.set_base_z(float(s.get("base_z", ctrl.base_z)))
+                    except Exception:
+                        pass
+
+                set_leg("FL", fl)
+                set_leg("FR", fr)
+                set_leg("RL", rl)
+                set_leg("RR", rr)
+
+                # Restore symmetry flags from config
+                try:
+                    if "front_sym" in g:
+                        global_ctrl.front_sym.set(bool(g.get("front_sym", old_front)))
+                    else:
+                        global_ctrl.front_sym.set(old_front)
+                    if "rear_sym" in g:
+                        global_ctrl.rear_sym.set(bool(g.get("rear_sym", old_rear)))
+                    else:
+                        global_ctrl.rear_sym.set(old_rear)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+        def _on_import() -> None:
+            p = _safe_open_json_path(root, _HERE)
+            if p is None:
+                return
+            try:
+                cfg = json.loads(p.read_text())
+                if not isinstance(cfg, dict):
+                    raise ValueError("Invalid configuration file format")
+                _apply_config(cfg)
+                try:
+                    messagebox.showinfo("Import", f"Loaded configuration from {p.name}")
+                except Exception:
+                    pass
+            except Exception as e:
+                try:
+                    messagebox.showerror("Import failed", str(e))
+                except Exception:
+                    pass
+
+        def _on_export() -> None:
+            try:
+                serial = _snapshot_config()
+                _OUT_DIR.mkdir(parents=True, exist_ok=True)
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                path = _OUT_DIR / f"gait_{ts}.json"
+                path.write_text(json.dumps(serial, indent=2))
+                try:
+                    messagebox.showinfo("Export", f"Saved to {path.name}")
+                except Exception:
+                    pass
+            except Exception as e:
+                try:
+                    messagebox.showerror("Export failed", str(e))
+                except Exception:
+                    pass
+
+        # Import/Export buttons next to Reset
+        ttk.Button(global_ctrl, text="Import…", command=_on_import).grid(row=6, column=1, sticky="w", pady=(6, 0), padx=(8, 0))
+        ttk.Button(global_ctrl, text="Export", command=_on_export).grid(row=6, column=2, sticky="w", pady=(6, 0), padx=(8, 0))
 
         while viewer.is_running():
             # Pump Tk UI
