@@ -1,0 +1,37 @@
+<mujoco model="g1 torso collision test">
+  <include file="g1.xml"/>
+
+  <statistic center="0 0 0.7" extent="2.5" meansize="0.04"/>
+
+  <visual>
+    <headlight diffuse=".8 .8 .8" ambient=".2 .2 .2" specular="1 1 1"/>
+    <global azimuth="180" elevation="-20"/>
+  </visual>
+
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="1 1 1" rgb2="1 1 1" width="800" height="800"/>
+    <texture type="2d" name="groundplane" builtin="checker" mark="edge" rgb1="1 1 1" rgb2="1 1 1" markrgb="0 0 0" width="300" height="300"/>
+    <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0"/>
+  </asset>
+
+  <worldbody>
+    <geom name="floor" size="0 0 0.02" type="plane" material="groundplane" contype="1" conaffinity="1"/>
+  </worldbody>
+
+  <keyframe>
+    <!-- Lay robot on its back: translate up a bit, rotate pitch by 90deg -->
+    <key name="on_back"
+      qpos="
+      0 0 0.9
+      0.7071068 0 0.7071068 0
+      0 0 0 0 0 0
+      0 0 0 0 0 0
+      0
+      0 0 0 0 0
+      0 0 0 0 0
+      "
+    />
+  </keyframe>
+</mujoco>
+
+

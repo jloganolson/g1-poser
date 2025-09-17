@@ -8,4 +8,8 @@ dependencies = [
     "loop-rate-limiters>=1.2.0",
     "mink>=0.0.12",
     "mujoco>=3.3.5",
+    "unitree-sdk2py",
 ]
+
+[tool.uv.sources]
+unitree-sdk2py = { path = "../unitree_sdk2_python", editable = true }

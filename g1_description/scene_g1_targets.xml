@@ -1,0 +1,39 @@
+<mujoco model="g1_scene_targets">
+  <include file="g1.xml"/>
+
+  <visual>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.1 0.1 0.1" specular="0 0 0"/>
+    <global azimuth="180" elevation="-20"/>
+  </visual>
+
+  <worldbody>
+    <!-- Add a simple floor for orientation context -->
+    <geom name="floor" type="plane" size="2 2 0.01" rgba="0.2 0.2 0.2 1"/>
+
+    <!-- Right palm target (mocap) -->
+    <body name="right_palm_target" pos="0.4 -0.2 1.0" quat="0 1 0 0" mocap="true">
+      <geom type="box" size=".04 .04 .04" contype="0" conaffinity="0" rgba="0.2 0.6 0.2 0.25"/>
+      <site type="sphere" size="0.01" rgba="0 0 1 1" group="1"/>
+    </body>
+
+    <!-- Left palm target (mocap) -->
+    <body name="left_palm_target" pos="0.4 0.2 1.0" quat="0 1 0 0" mocap="true">
+      <geom type="box" size=".04 .04 .04" contype="0" conaffinity="0" rgba="0.6 0.2 0.2 0.25"/>
+      <site type="sphere" size="0.01" rgba="1 0 0 1" group="1"/>
+    </body>
+
+    <!-- Left foot target (mocap) -->
+    <body name="left_foot_target" pos="0.1 0.1 0.2" quat="1 0 0 0" mocap="true">
+      <geom type="box" size=".035 .035 .02" contype="0" conaffinity="0" rgba="0.6 0.2 0.2 0.25"/>
+      <site type="sphere" size="0.008" rgba="1 0 0 1" group="1"/>
+    </body>
+
+    <!-- Right foot target (mocap) -->
+    <body name="right_foot_target" pos="0.1 -0.1 0.2" quat="1 0 0 0" mocap="true">
+      <geom type="box" size=".035 .035 .02" contype="0" conaffinity="0" rgba="0.2 0.2 0.6 0.25"/>
+      <site type="sphere" size="0.008" rgba="0 0 1 1" group="1"/>
+    </body>
+  </worldbody>
+</mujoco>
+
+
