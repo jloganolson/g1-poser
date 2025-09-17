@@ -1,5 +1,3 @@
-## G1 Poser
-
 Interactive MuJoCo-based poser and crawl-gait tuner for the Unitree G1, powered by MINK IK. The entrypoint and focus of this repo is `main.py`.
 
 ![App screenshot](screenshot.png)
