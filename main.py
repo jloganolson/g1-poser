@@ -1124,7 +1124,7 @@ if __name__ == "__main__":
                     T = 1e-6
                 num_steps = max(2, int(round(T * target_fps)))
                 dt = T / float(num_steps)
-                total_steps = 3 * num_steps  # export three full cycles
+                total_steps = num_steps  # export a single full cycle
 
                 # Snapshot leg UI
                 ui_snap = {}
@@ -1398,8 +1398,6 @@ if __name__ == "__main__":
                     "frames": frames,
                     "vel_frames": vel_frames,
                     "site_positions": site_positions_per_frame,
-                    "cycles": 3,
-                    "cycle_T": float(T),
                     "timestamp": datetime.now().isoformat(),
                     "metadata": {
                         "base": base_meta,
@@ -1410,6 +1408,7 @@ if __name__ == "__main__":
                             "indices": list(range(len(site_names))),
                             "by_name": {name: idx for idx, name in enumerate(site_names)},
                         },
+                        "base_forward_velocity_mps": float(torso_fwd_speed),
                     },
                 }
 
@@ -1419,7 +1418,7 @@ if __name__ == "__main__":
                 path.write_text(json.dumps(serial))
 
                 try:
-                    messagebox.showinfo("Export Animation", f"Saved animation to {path.name} ({len(frames)} frames, 3 cycles)")
+                    messagebox.showinfo("Export Animation", f"Saved animation to {path.name} ({len(frames)} frames)")
                 except Exception:
                     pass
             except Exception as e:
