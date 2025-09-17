@@ -662,7 +662,7 @@ if __name__ == "__main__":
 
     # Viewer + IK loop
     solver = "daqp"
-    with mujoco.viewer.launch_passive(model=model, data=data, show_left_ui=False, show_right_ui=False) as viewer:
+    with mujoco.viewer.launch_passive(model=model, data=data, show_left_ui=True, show_right_ui=True) as viewer:
         mujoco.mjv_defaultFreeCamera(model, viewer.cam)
         # Camera follow: track the pelvis body
         try:
@@ -1282,6 +1282,18 @@ if __name__ == "__main__":
                     offline_cfg.integrate_inplace(vel, dt)
 
                     frames.append([float(x) for x in d_off.qpos])
+
+                # Recenter XY plane so the initial base X/Y become 0 across all frames
+                if free_qpos_addr is not None and len(frames) > 0:
+                    try:
+                        x0 = float(frames[0][free_qpos_addr + 0])
+                        y0 = float(frames[0][free_qpos_addr + 1])
+                        if x0 != 0.0 or y0 != 0.0:
+                            for frame_vals in frames:
+                                frame_vals[free_qpos_addr + 0] = float(frame_vals[free_qpos_addr + 0]) - x0
+                                frame_vals[free_qpos_addr + 1] = float(frame_vals[free_qpos_addr + 1]) - y0
+                    except Exception:
+                        pass
 
                 # Build metadata similar to mink_g1_pose_ik.py
                 base_meta = None

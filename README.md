@@ -71,6 +71,7 @@ This issue was discovered and resolved in December 2024. The `temp.py` file demo
 - **fps**: Convenience frames-per-second (`1/dt`).
 - **nq**: Length of each `qpos` vector.
 - **frames**: List of length-`nq` float arrays. Each array is the full MuJoCo `qpos` at that frame in MJCF order.
+- **XY recentering**: The animation is recentered so that the base root's X/Y in the first frame are zero. All frames are offset by the initial base X/Y.
 - **cycles**: Number of gait cycles exported (typically 3). Informational.
 - **cycle_T**: Gait cycle duration used when generating, in seconds. Informational.
 - **timestamp**: ISO8601 string.
