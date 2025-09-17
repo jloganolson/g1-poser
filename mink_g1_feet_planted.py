@@ -1211,8 +1211,20 @@ if __name__ == "__main__":
                     }
 
                 frames = []
+                vel_frames: list[list[float]] = []
                 local_solver = "daqp"
                 s_forward = 0.0
+
+                # Collect site metadata once and record positions each frame
+                site_count = int(offline_cfg.model.nsite)
+                site_names: list[str] = []
+                for sid in range(site_count):
+                    try:
+                        nm = mujoco.mj_id2name(offline_cfg.model, mujoco.mjtObj.mjOBJ_SITE, sid)
+                    except Exception:
+                        nm = None
+                    site_names.append(str(nm) if nm is not None else f"site_{sid}")
+                site_positions_per_frame: list[list[list[float]]] = []
 
                 for k in range(total_steps):
                     t_local = float(k) * dt
@@ -1282,6 +1294,25 @@ if __name__ == "__main__":
                     offline_cfg.integrate_inplace(vel, dt)
 
                     frames.append([float(x) for x in d_off.qpos])
+                    try:
+                        vel_frames.append([float(x) for x in vel])
+                    except Exception:
+                        # Fallback to zeros on failure to capture velocities
+                        vel_frames.append([0.0 for _ in range(int(offline_cfg.model.nv))])
+
+                    # Capture site world positions after integration for this frame
+                    try:
+                        site_xyz = []
+                        for sid in range(site_count):
+                            site_xyz.append([
+                                float(d_off.site_xpos[sid][0]),
+                                float(d_off.site_xpos[sid][1]),
+                                float(d_off.site_xpos[sid][2]),
+                            ])
+                        site_positions_per_frame.append(site_xyz)
+                    except Exception:
+                        # Ensure lengths match even if sampling fails
+                        site_positions_per_frame.append([[0.0, 0.0, 0.0] for _ in range(site_count)])
 
                 # Recenter XY plane so the initial base X/Y become 0 across all frames
                 if free_qpos_addr is not None and len(frames) > 0:
@@ -1292,6 +1323,11 @@ if __name__ == "__main__":
                             for frame_vals in frames:
                                 frame_vals[free_qpos_addr + 0] = float(frame_vals[free_qpos_addr + 0]) - x0
                                 frame_vals[free_qpos_addr + 1] = float(frame_vals[free_qpos_addr + 1]) - y0
+                            # Apply the same recentering to all site positions
+                            for site_frame in site_positions_per_frame:
+                                for s in site_frame:
+                                    s[0] = float(s[0]) - x0
+                                    s[1] = float(s[1]) - y0
                     except Exception:
                         pass
 
@@ -1356,8 +1392,12 @@ if __name__ == "__main__":
                     "model_xml": str(_XML),
                     "dt": float(dt),
                     "fps": float(fps),
+                    "nsite": int(model.nsite),
                     "nq": int(model.nq),
+                    "nv": int(model.nv),
                     "frames": frames,
+                    "vel_frames": vel_frames,
+                    "site_positions": site_positions_per_frame,
                     "cycles": 3,
                     "cycle_T": float(T),
                     "timestamp": datetime.now().isoformat(),
@@ -1365,6 +1405,11 @@ if __name__ == "__main__":
                         "base": base_meta,
                         "joints": joints_meta,
                         "qpos_labels": qpos_labels,
+                        "sites": {
+                            "names": site_names,
+                            "indices": list(range(len(site_names))),
+                            "by_name": {name: idx for idx, name in enumerate(site_names)},
+                        },
                     },
                 }
 
