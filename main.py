@@ -164,14 +164,11 @@ if __name__ == "__main__":
     panel.pack(fill="x")
 
     tv_speed = tk.DoubleVar(value=0.10)     # torso_fwd_speed (m/s)
-    tv_cam_az = tk.DoubleVar(value=137.368)   # camera azimuth in degrees
-    tv_cam_el = tk.DoubleVar(value=-16.395)   # camera elevation in degrees (negative looks down)
-    tv_cam_dist = tk.DoubleVar(value=2.355)   # camera distance (m)
+    CAM_AZ0 = 137.368
+    CAM_EL0 = -16.395
+    CAM_DIST0 = 2.355
 
     add_scale(panel, "Torso speed (m/s)", tv_speed, 0.0, 0.40)
-    add_scale(panel, "Camera azimuth (deg)", tv_cam_az, -180.0, 180.0)
-    add_scale(panel, "Camera elevation (deg)", tv_cam_el, -89.0, 89.0)
-    add_scale(panel, "Camera distance (m)", tv_cam_dist, 0.5, 5.0)
 
     # ---- Minimal 2D Foot Placement UI (front/rear with symmetry) ----
     class XYPad(ttk.Frame):
@@ -676,9 +673,9 @@ if __name__ == "__main__":
                 viewer.cam.fixedcamid = -1
                 # Initialize camera parameters
                 viewer.cam.lookat[:] = data.xpos[pelvis_bid]
-                viewer.cam.azimuth = float(tv_cam_az.get())
-                viewer.cam.elevation = float(tv_cam_el.get())
-                viewer.cam.distance = float(tv_cam_dist.get())
+                viewer.cam.azimuth = float(CAM_AZ0)
+                viewer.cam.elevation = float(CAM_EL0)
+                viewer.cam.distance = float(CAM_DIST0)
         except Exception:
             pass
 
@@ -864,14 +861,19 @@ if __name__ == "__main__":
             try:
                 # Reset UI controls
                 tv_speed.set(0.10)
-                tv_cam_az.set(137.368)
-                tv_cam_el.set(-16.395)
-                tv_cam_dist.set(2.355)
                 global_ctrl.reset()
                 fl.reset()
                 fr.reset()
                 rl.reset()
                 rr.reset()
+
+                # Reset camera to starting orbit values
+                try:
+                    viewer.cam.azimuth = float(CAM_AZ0)
+                    viewer.cam.elevation = float(CAM_EL0)
+                    viewer.cam.distance = float(CAM_DIST0)
+                except Exception:
+                    pass
 
                 # Reset timers and base forward displacement
                 t_sim = 0.0
@@ -980,9 +982,9 @@ if __name__ == "__main__":
                 "timestamp": datetime.now().isoformat(),
                 "speed": float(tv_speed.get()),
                 "camera": {
-                    "azimuth": float(tv_cam_az.get()),
-                    "elevation": float(tv_cam_el.get()),
-                    "distance": float(tv_cam_dist.get()),
+                    "azimuth": float(viewer.cam.azimuth),
+                    "elevation": float(viewer.cam.elevation),
+                    "distance": float(viewer.cam.distance),
                 },
                 "global": global_ctrl.snapshot(),
                 "legs": {
@@ -1008,11 +1010,11 @@ if __name__ == "__main__":
                     cam = cfg.get("camera", {}) or {}
                     if isinstance(cam, dict):
                         if "azimuth" in cam:
-                            tv_cam_az.set(float(cam.get("azimuth", float(tv_cam_az.get()))))
+                            viewer.cam.azimuth = float(cam.get("azimuth", float(viewer.cam.azimuth)))
                         if "elevation" in cam:
-                            tv_cam_el.set(float(cam.get("elevation", float(tv_cam_el.get()))))
+                            viewer.cam.elevation = float(cam.get("elevation", float(viewer.cam.elevation)))
                         if "distance" in cam:
-                            tv_cam_dist.set(float(cam.get("distance", float(tv_cam_dist.get()))))
+                            viewer.cam.distance = float(cam.get("distance", float(viewer.cam.distance)))
                 except Exception:
                     pass
 
@@ -1112,7 +1114,6 @@ if __name__ == "__main__":
         ttk.Button(global_ctrl, text="Export", command=_on_export).grid(row=6, column=2, sticky="w", pady=(6, 0), padx=(8, 0))
 
         def _on_export_animation() -> None:
-            try:
                 # Snapshot current UI parameters
                 T = float(global_ctrl.cycle_T.get())
                 gap = float(global_ctrl.phase_gap.get())
@@ -1171,10 +1172,9 @@ if __name__ == "__main__":
                 phase_offsets = {"FL": 0.0, "RR": gap, "FR": 2.0 * gap, "RL": 3.0 * gap}
 
                 # Pelvis id and free-joint base
-                try:
-                    pelvis_bid = mujoco.mj_name2id(offline_cfg.model, mujoco.mjtObj.mjOBJ_BODY, "pelvis")
-                except Exception:
-                    pelvis_bid = -1
+                pelvis_bid = mujoco.mj_name2id(offline_cfg.model, mujoco.mjtObj.mjOBJ_BODY, "pelvis")
+                if pelvis_bid == -1:
+                    raise ValueError("Body 'pelvis' not found in model")
 
                 free_qpos_addr = None
                 for j in range(offline_cfg.model.njnt):
@@ -1219,12 +1219,21 @@ if __name__ == "__main__":
                 site_count = int(offline_cfg.model.nsite)
                 site_names: list[str] = []
                 for sid in range(site_count):
-                    try:
-                        nm = mujoco.mj_id2name(offline_cfg.model, mujoco.mjtObj.mjOBJ_SITE, sid)
-                    except Exception:
-                        nm = None
+                    nm = mujoco.mj_id2name(offline_cfg.model, mujoco.mjtObj.mjOBJ_SITE, sid)
                     site_names.append(str(nm) if nm is not None else f"site_{sid}")
                 site_positions_per_frame: list[list[list[float]]] = []
+
+                # Contact detection setup (FL, FR, RL, RR)
+                def _site_id(m: mujoco.MjModel, name: str) -> int:
+                    sid = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_SITE, name)
+                    return int(sid)
+
+                site_id_FL = _site_id(offline_cfg.model, "left_palm")
+                site_id_FR = _site_id(offline_cfg.model, "right_palm")
+                site_id_RL = _site_id(offline_cfg.model, "left_foot")
+                site_id_RR = _site_id(offline_cfg.model, "right_foot")
+                contact_threshold_m = 0.01
+                contact_flags_per_frame: list[list[int]] = []
 
                 for k in range(total_steps):
                     t_local = float(k) * dt
@@ -1294,58 +1303,58 @@ if __name__ == "__main__":
                     offline_cfg.integrate_inplace(vel, dt)
 
                     frames.append([float(x) for x in d_off.qpos])
-                    try:
-                        vel_frames.append([float(x) for x in vel])
-                    except Exception:
-                        # Fallback to zeros on failure to capture velocities
-                        vel_frames.append([0.0 for _ in range(int(offline_cfg.model.nv))])
+                    vel_frames.append([float(x) for x in vel])
 
                     # Capture site world positions after integration for this frame
-                    try:
-                        site_xyz = []
-                        for sid in range(site_count):
-                            site_xyz.append([
-                                float(d_off.site_xpos[sid][0]),
-                                float(d_off.site_xpos[sid][1]),
-                                float(d_off.site_xpos[sid][2]),
-                            ])
-                        site_positions_per_frame.append(site_xyz)
-                    except Exception:
-                        # Ensure lengths match even if sampling fails
-                        site_positions_per_frame.append([[0.0, 0.0, 0.0] for _ in range(site_count)])
+                    site_xyz = []
+                    for sid in range(site_count):
+                        site_xyz.append([
+                            float(d_off.site_xpos[sid][0]),
+                            float(d_off.site_xpos[sid][1]),
+                            float(d_off.site_xpos[sid][2]),
+                        ])
+                    site_positions_per_frame.append(site_xyz)
+
+                    # Record contact flags after integration (1 if z <= threshold, else 0)
+                    def _flag(sid: int) -> int:
+                        if sid < 0 or sid >= int(offline_cfg.model.nsite):
+                            return 0
+                        z = float(d_off.site_xpos[sid][2])
+                        return 1 if z <= contact_threshold_m else 0
+
+                    contact_flags_per_frame.append([
+                        _flag(site_id_FL),  # FL (left hand)
+                        _flag(site_id_FR),  # FR (right hand)
+                        _flag(site_id_RL),  # RL (left foot)
+                        _flag(site_id_RR),  # RR (right foot)
+                    ])
 
                 # Recenter XY plane so the initial base X/Y become 0 across all frames
                 if free_qpos_addr is not None and len(frames) > 0:
-                    try:
-                        x0 = float(frames[0][free_qpos_addr + 0])
-                        y0 = float(frames[0][free_qpos_addr + 1])
-                        if x0 != 0.0 or y0 != 0.0:
-                            for frame_vals in frames:
-                                frame_vals[free_qpos_addr + 0] = float(frame_vals[free_qpos_addr + 0]) - x0
-                                frame_vals[free_qpos_addr + 1] = float(frame_vals[free_qpos_addr + 1]) - y0
-                            # Apply the same recentering to all site positions
-                            for site_frame in site_positions_per_frame:
-                                for s in site_frame:
-                                    s[0] = float(s[0]) - x0
-                                    s[1] = float(s[1]) - y0
-                    except Exception:
-                        pass
+                    x0 = float(frames[0][free_qpos_addr + 0])
+                    y0 = float(frames[0][free_qpos_addr + 1])
+                    if x0 != 0.0 or y0 != 0.0:
+                        for frame_vals in frames:
+                            frame_vals[free_qpos_addr + 0] = float(frame_vals[free_qpos_addr + 0]) - x0
+                            frame_vals[free_qpos_addr + 1] = float(frame_vals[free_qpos_addr + 1]) - y0
+                        # Apply the same recentering to all site positions
+                        for site_frame in site_positions_per_frame:
+                            for s in site_frame:
+                                s[0] = float(s[0]) - x0
+                                s[1] = float(s[1]) - y0
 
                 # Build metadata similar to mink_g1_pose_ik.py
                 base_meta = None
-                try:
-                    free_qpos_addr2 = None
-                    for j in range(model.njnt):
-                        if int(model.jnt_type[j]) == 0:
-                            free_qpos_addr2 = int(model.jnt_qposadr[j])
-                            break
-                    if free_qpos_addr2 is not None:
-                        base_meta = {
-                            "pos_indices": [free_qpos_addr2 + i for i in range(3)],
-                            "quat_indices": [free_qpos_addr2 + 3 + i for i in range(4)],
-                        }
-                except Exception:
-                    pass
+                free_qpos_addr2 = None
+                for j in range(model.njnt):
+                    if int(model.jnt_type[j]) == 0:
+                        free_qpos_addr2 = int(model.jnt_qposadr[j])
+                        break
+                if free_qpos_addr2 is not None:
+                    base_meta = {
+                        "pos_indices": [free_qpos_addr2 + i for i in range(3)],
+                        "quat_indices": [free_qpos_addr2 + 3 + i for i in range(4)],
+                    }
 
                 joints_meta = []
                 qpos_labels = [f"qpos[{i}]" for i in range(model.nq)]
@@ -1355,36 +1364,33 @@ if __name__ == "__main__":
                         qpos_labels[i] = name
 
                 for j in range(model.njnt):
-                    try:
-                        jtype = int(model.jnt_type[j])
-                        qadr = int(model.jnt_qposadr[j])
-                        name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, j) or f"joint_{j}"
-                        if jtype == 0:
-                            jtypestr = "free"
-                            qdim = 7
-                        elif jtype == 1:
-                            jtypestr = "ball"
-                            qdim = 4
-                            _set_label(qadr + 0, f"ball:{name}:w")
-                            _set_label(qadr + 1, f"ball:{name}:x")
-                            _set_label(qadr + 2, f"ball:{name}:y")
-                            _set_label(qadr + 3, f"ball:{name}:z")
-                        elif jtype == 2:
-                            jtypestr = "slide"
-                            qdim = 1
-                            _set_label(qadr + 0, f"joint:{name}")
-                        else:
-                            jtypestr = "hinge"
-                            qdim = 1
-                            _set_label(qadr + 0, f"joint:{name}")
-                        joints_meta.append({
-                            "name": str(name),
-                            "type": jtypestr,
-                            "qposadr": int(qadr),
-                            "qposdim": int(qdim),
-                        })
-                    except Exception:
-                        pass
+                    jtype = int(model.jnt_type[j])
+                    qadr = int(model.jnt_qposadr[j])
+                    name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, j) or f"joint_{j}"
+                    if jtype == 0:
+                        jtypestr = "free"
+                        qdim = 7
+                    elif jtype == 1:
+                        jtypestr = "ball"
+                        qdim = 4
+                        _set_label(qadr + 0, f"ball:{name}:w")
+                        _set_label(qadr + 1, f"ball:{name}:x")
+                        _set_label(qadr + 2, f"ball:{name}:y")
+                        _set_label(qadr + 3, f"ball:{name}:z")
+                    elif jtype == 2:
+                        jtypestr = "slide"
+                        qdim = 1
+                        _set_label(qadr + 0, f"joint:{name}")
+                    else:
+                        jtypestr = "hinge"
+                        qdim = 1
+                        _set_label(qadr + 0, f"joint:{name}")
+                    joints_meta.append({
+                        "name": str(name),
+                        "type": jtypestr,
+                        "qposadr": int(qadr),
+                        "qposdim": int(qdim),
+                    })
 
                 fps = 1.0 / float(dt)
                 serial = {
@@ -1398,6 +1404,7 @@ if __name__ == "__main__":
                     "frames": frames,
                     "vel_frames": vel_frames,
                     "site_positions": site_positions_per_frame,
+                    "contact_flags": contact_flags_per_frame,
                     "timestamp": datetime.now().isoformat(),
                     "metadata": {
                         "base": base_meta,
@@ -1408,6 +1415,10 @@ if __name__ == "__main__":
                             "indices": list(range(len(site_names))),
                             "by_name": {name: idx for idx, name in enumerate(site_names)},
                         },
+                        "contact": {
+                            "order": ["FL", "FR", "RL", "RR"],
+                            "threshold_m": float(contact_threshold_m),
+                        },
                         "base_forward_velocity_mps": float(torso_fwd_speed),
                     },
                 }
@@ -1417,15 +1428,7 @@ if __name__ == "__main__":
                 path = _OUT_DIR / f"animation_{ts}.json"
                 path.write_text(json.dumps(serial))
 
-                try:
-                    messagebox.showinfo("Export Animation", f"Saved animation to {path.name} ({len(frames)} frames)")
-                except Exception:
-                    pass
-            except Exception as e:
-                try:
-                    messagebox.showerror("Export Animation failed", str(e))
-                except Exception:
-                    pass
+                messagebox.showinfo("Export Animation", f"Saved animation to {path.name} ({len(frames)} frames)")
 
         ttk.Button(global_ctrl, text="Export Animation", command=_on_export_animation).grid(row=6, column=3, sticky="w", pady=(6, 0), padx=(8, 0))
 
@@ -1518,17 +1521,7 @@ if __name__ == "__main__":
             vel = mink.solve_ik(configuration, tasks, rate.dt, solver, 1e-1, limits=limits)
             configuration.integrate_inplace(vel, rate.dt)
 
-            # Keep camera centered on pelvis and apply orbit parameters
-            try:
-                if pelvis_bid != -1:
-                    viewer.cam.lookat[0] = float(data.xpos[pelvis_bid][0])
-                    viewer.cam.lookat[1] = float(data.xpos[pelvis_bid][1])
-                    viewer.cam.lookat[2] = float(data.xpos[pelvis_bid][2])
-                    viewer.cam.azimuth = float(tv_cam_az.get())
-                    viewer.cam.elevation = float(tv_cam_el.get())
-                    viewer.cam.distance = float(tv_cam_dist.get())
-            except Exception:
-                pass
+            # Camera is controlled by standard MuJoCo orbit controls; no UI overrides here
 
             mujoco.mj_camlight(model, data)
             viewer.sync()
