@@ -85,6 +85,49 @@ def _swing_interp(p0: tuple[float, float, float], p1: tuple[float, float, float]
     return (x, y, z)
 
 
+# ---- GUI helpers (no Tk Entry widgets; use Zenity for typed input) ----
+def _zenity_prompt_float(title: str, text: str, initial: float) -> float | None:
+    """Prompt the user for a float using external zenity entry dialog.
+
+    Returns None if cancelled/unavailable/invalid. This avoids Tk Entry widgets.
+    """
+    try:
+        zenity = shutil.which("zenity")
+        if not zenity:
+            try:
+                messagebox.showerror(title, "Zenity not available. Install 'zenity' to type values.")
+            except Exception:
+                pass
+            return None
+        cmd = [
+            zenity,
+            "--entry",
+            f"--title={title}",
+            f"--text={text}",
+            f"--entry-text={initial}",
+        ]
+        proc = subprocess.run(cmd, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if proc.returncode != 0:
+            return None
+        s = (proc.stdout or "").strip()
+        if not s:
+            return None
+        try:
+            return float(s)
+        except Exception:
+            try:
+                messagebox.showerror(title, f"Invalid number: {s}")
+            except Exception:
+                pass
+            return None
+    except Exception:
+        return None
+
+
+def _clamp(v: float, lo: float, hi: float) -> float:
+    return lo if v < lo else (hi if v > hi else v)
+
+
 if __name__ == "__main__":
     # Load scene and build initial state
     model = mujoco.MjModel.from_xml_path(_XML.as_posix())
@@ -144,12 +187,31 @@ if __name__ == "__main__":
     root = tk.Tk()
     root.title("Crawl Gait Tuning")
 
-    def add_scale(parent, label: str, var: tk.DoubleVar, lo: float, hi: float, resolution: float = 0.001) -> None:
+    def add_scale(parent, label: str, var: tk.DoubleVar, lo: float, hi: float, default_val: float, resolution: float = 0.001) -> None:
         row = ttk.Frame(parent)
         row.pack(fill="x", padx=8, pady=4)
         ttk.Label(row, text=label, width=22).pack(side="left")
         val_label = ttk.Label(row, width=8, anchor="e")
         val_label.pack(side="right")
+        # Per-slider actions: Reset and Type (zenity)
+        btns = ttk.Frame(row)
+        btns.pack(side="right", padx=(6, 0))
+        def _do_reset() -> None:
+            try:
+                var.set(float(_clamp(float(default_val), float(lo), float(hi))))
+            except Exception:
+                pass
+        def _do_type() -> None:
+            try:
+                v0 = float(var.get())
+            except Exception:
+                v0 = float(default_val)
+            v = _zenity_prompt_float("Set value", f"Enter value within [{lo}, {hi}] for {label}", v0)
+            if v is None:
+                return
+            var.set(float(_clamp(float(v), float(lo), float(hi))))
+        ttk.Button(btns, text="Reset", width=6, command=_do_reset).pack(side="left", padx=(0, 4))
+        ttk.Button(btns, text="Type…", width=6, command=_do_type).pack(side="left")
         def _update_label(*_args):
             try:
                 val_label.configure(text=f"{float(var.get()):.3f}")
@@ -168,7 +230,7 @@ if __name__ == "__main__":
     CAM_EL0 = -16.395
     CAM_DIST0 = 2.355
 
-    add_scale(panel, "Torso speed (m/s)", tv_speed, 0.0, 0.40)
+    add_scale(panel, "Torso speed (m/s)", tv_speed, 0.0, 0.40, 0.10)
 
     # ---- Minimal 2D Foot Placement UI (front/rear with symmetry) ----
     class XYPad(ttk.Frame):
@@ -446,18 +508,60 @@ if __name__ == "__main__":
             ttk.Scale(self, from_=0.2, to=5.0, variable=self.cycle_T, orient="horizontal", length=160).grid(row=row, column=1, sticky="ew", padx=(6, 0))
             self._cycle_lbl = ttk.Label(self, text=f"{float(self.cycle_T.get()):.2f}")
             self._cycle_lbl.grid(row=row, column=2, sticky="w")
+            _btns0 = ttk.Frame(self)
+            _btns0.grid(row=row, column=3, sticky="w", padx=(6, 0))
+            def _cycle_reset() -> None:
+                try:
+                    self.cycle_T.set(float(_clamp(1.2, 0.2, 5.0)))
+                except Exception:
+                    pass
+            def _cycle_type() -> None:
+                v = _zenity_prompt_float("Cycle (s)", "Enter cycle period in seconds [0.2, 5.0]", float(self.cycle_T.get()))
+                if v is None:
+                    return
+                self.cycle_T.set(float(_clamp(float(v), 0.2, 5.0)))
+            ttk.Button(_btns0, text="Reset", width=6, command=_cycle_reset).pack(side="left", padx=(0, 4))
+            ttk.Button(_btns0, text="Type…", width=6, command=_cycle_type).pack(side="left")
             row += 1
 
             ttk.Label(self, text="Phase gap").grid(row=row, column=0, sticky="w")
             ttk.Scale(self, from_=0.0, to=0.5, variable=self.phase_gap, orient="horizontal", length=160).grid(row=row, column=1, sticky="ew", padx=(6, 0))
             self._gap_lbl = ttk.Label(self, text=f"{float(self.phase_gap.get()):.2f}")
             self._gap_lbl.grid(row=row, column=2, sticky="w")
+            _btns1 = ttk.Frame(self)
+            _btns1.grid(row=row, column=3, sticky="w", padx=(6, 0))
+            def _gap_reset() -> None:
+                try:
+                    self.phase_gap.set(float(_clamp(0.25, 0.0, 0.5)))
+                except Exception:
+                    pass
+            def _gap_type() -> None:
+                v = _zenity_prompt_float("Phase gap", "Enter gap within [0.0, 0.5]", float(self.phase_gap.get()))
+                if v is None:
+                    return
+                self.phase_gap.set(float(_clamp(float(v), 0.0, 0.5)))
+            ttk.Button(_btns1, text="Reset", width=6, command=_gap_reset).pack(side="left", padx=(0, 4))
+            ttk.Button(_btns1, text="Type…", width=6, command=_gap_type).pack(side="left")
             row += 1
 
             ttk.Label(self, text="Duty").grid(row=row, column=0, sticky="w")
             ttk.Scale(self, from_=0.5, to=0.95, variable=self.duty, orient="horizontal", length=160).grid(row=row, column=1, sticky="ew", padx=(6, 0))
             self._duty_lbl = ttk.Label(self, text=f"{float(self.duty.get()):.2f}")
             self._duty_lbl.grid(row=row, column=2, sticky="w")
+            _btns2 = ttk.Frame(self)
+            _btns2.grid(row=row, column=3, sticky="w", padx=(6, 0))
+            def _duty_reset() -> None:
+                try:
+                    self.duty.set(float(_clamp(0.7, 0.5, 0.95)))
+                except Exception:
+                    pass
+            def _duty_type() -> None:
+                v = _zenity_prompt_float("Duty", "Enter duty within [0.5, 0.95]", float(self.duty.get()))
+                if v is None:
+                    return
+                self.duty.set(float(_clamp(float(v), 0.5, 0.95)))
+            ttk.Button(_btns2, text="Reset", width=6, command=_duty_reset).pack(side="left", padx=(0, 4))
+            ttk.Button(_btns2, text="Type…", width=6, command=_duty_type).pack(side="left")
             row += 1
 
             ttk.Checkbutton(self, text="Run", variable=self.running).grid(row=row, column=0, sticky="w")
