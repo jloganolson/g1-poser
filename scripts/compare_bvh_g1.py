@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Tuple, Dict
 
 import numpy as np
+import time
 
 # Use non-interactive backend for headless environments
 import matplotlib
@@ -26,6 +27,15 @@ class BVHNode:
     name: str
     offset: np.ndarray
     children: List["BVHNode"] = field(default_factory=list)
+    channels: List[str] = field(default_factory=list)  # e.g., ["Xposition","Yposition","Zposition","Zrotation",...]
+    channel_offset: int = -1  # start index into flattened per-frame channel array
+
+
+@dataclass
+class BVHMotion:
+    frames: np.ndarray  # shape: (num_frames, total_channels)
+    frame_time: float
+    total_channels: int
 
 
 def _tokenize_bvh(text: str) -> List[str]:
@@ -53,6 +63,8 @@ class BVHParser:
     def __init__(self, tokens: List[str]):
         self.toks = tokens
         self.i = 0
+        self.total_channels = 0
+        self.nodes_in_order: List[BVHNode] = []
 
     def _peek(self) -> str:
         return self.toks[self.i]
@@ -76,6 +88,41 @@ class BVHParser:
         # Optionally skip MOTION; we only need hierarchy/offsets for rest pose
         return root
 
+    def parse_with_motion(self) -> Tuple[BVHNode, BVHMotion]:
+        # Parse hierarchy
+        if self._next().upper() != "HIERARCHY":
+            self.i -= 1
+        root = self._parse_joint(expect_root=True)
+
+        # Parse MOTION strictly
+        tok = self._next()
+        if tok.upper() != "MOTION":
+            raise ValueError(f"Expected MOTION section, got '{tok}' at token {self.i}")
+
+        t = self._next()
+        if not t.upper().startswith("FRAMES"):
+            raise ValueError("Expected 'Frames:' in MOTION section")
+        num_frames = int(self._next())
+
+        t = self._next()
+        if not t.upper().startswith("FRAME"):
+            raise ValueError("Expected 'Frame Time:' in MOTION section")
+        t = self._next()
+        if not t.upper().startswith("TIME"):
+            raise ValueError("Expected 'Frame Time:' in MOTION section")
+        frame_time = float(self._next())
+
+        if self.total_channels <= 0:
+            raise ValueError("No channels described in hierarchy; cannot read motion frames")
+
+        values: List[float] = []
+        needed = int(num_frames * self.total_channels)
+        for _ in range(needed):
+            values.append(float(self._next()))
+        frames = np.asarray(values, dtype=np.float64).reshape((num_frames, self.total_channels))
+        motion = BVHMotion(frames=frames, frame_time=float(frame_time), total_channels=int(self.total_channels))
+        return root, motion
+
     def _parse_joint(self, expect_root: bool = False) -> BVHNode:
         head = self._next()
         if expect_root:
@@ -93,14 +140,19 @@ class BVHParser:
         ox = float(self._next()); oy = float(self._next()); oz = float(self._next())
         offset = np.array([ox, oy, oz], dtype=np.float64)
 
-        # CHANNELS (ignore, we only need hierarchy for size/shape)
+        # CHANNELS: record channel names and offsets for motion
         tok = self._next()
+        node_channels: List[str] = []
         if tok.upper() == "CHANNELS":
             n = int(self._next())
-            # Skip channel names
             for _ in range(n):
-                _ = self._next()
+                node_channels.append(self._next())
             tok = self._next()
+        node = BVHNode(name=name, offset=offset, children=[], channels=node_channels, channel_offset=-1)
+        if node_channels:
+            node.channel_offset = int(self.total_channels)
+            self.total_channels += len(node_channels)
+            self.nodes_in_order.append(node)
 
         # Children until '}'
         children: List[BVHNode] = []
@@ -129,7 +181,8 @@ class BVHParser:
                 raise ValueError(f"Unexpected token while parsing children: {tok}")
             tok = self._next()
 
-        return BVHNode(name=name, offset=offset, children=children)
+        node.children = children
+        return node
 
 
 def load_bvh_hierarchy(path: str) -> BVHNode:
@@ -137,6 +190,13 @@ def load_bvh_hierarchy(path: str) -> BVHNode:
     toks = _tokenize_bvh(text)
     parser = BVHParser(toks)
     return parser.parse()
+
+
+def load_bvh_with_motion(path: str) -> Tuple[BVHNode, BVHMotion]:
+    text = open(path, "r", encoding="utf-8", errors="ignore").read()
+    toks = _tokenize_bvh(text)
+    parser = BVHParser(toks)
+    return parser.parse_with_motion()
 
 
 def compute_bvh_rest_world_positions(root: BVHNode) -> Tuple[np.ndarray, List[Tuple[int, int]], List[str]]:
@@ -156,6 +216,84 @@ def compute_bvh_rest_world_positions(root: BVHNode) -> Tuple[np.ndarray, List[Tu
         return idx
 
     dfs(root, None, np.zeros(3, dtype=np.float64))
+    return np.vstack(positions), edges, names
+
+
+def _rot_x(a: float) -> np.ndarray:
+    c = math.cos(a); s = math.sin(a)
+    return np.array([[1.0, 0.0, 0.0], [0.0, c, -s], [0.0, s, c]], dtype=np.float64)
+
+
+def _rot_y(a: float) -> np.ndarray:
+    c = math.cos(a); s = math.sin(a)
+    return np.array([[c, 0.0, s], [0.0, 1.0, 0.0], [-s, 0.0, c]], dtype=np.float64)
+
+
+def _rot_z(a: float) -> np.ndarray:
+    c = math.cos(a); s = math.sin(a)
+    return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]], dtype=np.float64)
+
+
+def compute_bvh_frame_world_positions(root: BVHNode, motion: BVHMotion, frame_idx: int) -> Tuple[np.ndarray, List[Tuple[int, int]], List[str]]:
+    """Forward-kinematics joint positions for a given frame.
+
+    Returns points, edges, names in BVH coordinates.
+    """
+    values = motion.frames[int(frame_idx)]
+    positions: List[np.ndarray] = []
+    edges: List[Tuple[int, int]] = []
+    names: List[str] = []
+
+    def local_rotation(node: BVHNode) -> np.ndarray:
+        if not node.channels:
+            return np.eye(3, dtype=np.float64)
+        R = np.eye(3, dtype=np.float64)
+        off = node.channel_offset
+        for j, ch in enumerate(node.channels):
+            v = float(values[off + j])
+            if ch.lower().endswith("rotation"):
+                a = math.radians(v)
+                axis = ch[0].upper()
+                if axis == "X":
+                    R = R @ _rot_x(a)
+                elif axis == "Y":
+                    R = R @ _rot_y(a)
+                elif axis == "Z":
+                    R = R @ _rot_z(a)
+        return R
+
+    def root_translation(node: BVHNode) -> np.ndarray:
+        if not node.channels:
+            return np.zeros(3, dtype=np.float64)
+        t = np.zeros(3, dtype=np.float64)
+        off = node.channel_offset
+        for j, ch in enumerate(node.channels):
+            if ch.lower().endswith("position"):
+                axis = ch[0].upper()
+                if axis == "X":
+                    t[0] = float(values[off + j])
+                elif axis == "Y":
+                    t[1] = float(values[off + j])
+                elif axis == "Z":
+                    t[2] = float(values[off + j])
+        return t
+
+    def dfs(node: BVHNode, parent_index: int, parent_pos: np.ndarray, parent_rot: np.ndarray, is_root: bool) -> int:
+        idx = len(positions)
+        R_local = local_rotation(node)
+        R_world = parent_rot @ R_local
+        pos = parent_pos + parent_rot @ node.offset
+        if is_root:
+            pos = pos + root_translation(node)
+        positions.append(pos)
+        names.append(node.name)
+        if parent_index is not None and parent_index >= 0:
+            edges.append((parent_index, idx))
+        for child in node.children:
+            dfs(child, idx, pos, R_world, False)
+        return idx
+
+    dfs(root, -1, np.zeros(3, dtype=np.float64), np.eye(3, dtype=np.float64), True)
     return np.vstack(positions), edges, names
 
 
@@ -446,7 +584,8 @@ def main() -> None:
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
     # --- BVH ---
-    bvh_root = load_bvh_hierarchy(bvh_path)
+    # Load BVH with motion for playback and get rest skeleton for initial scaling
+    bvh_root, bvh_motion = load_bvh_with_motion(bvh_path)
     bvh_pts, bvh_edges, bvh_names = compute_bvh_rest_world_positions(bvh_root)
     # Apply single-step axis rotation
     bvh_pts = (ROT_BVH_TO_G1 @ bvh_pts.T).T
@@ -516,11 +655,22 @@ def main() -> None:
 
     if INTERACTIVE_VIEWER:
         # In viewer: draw BVH overlay in WORLD coordinates
-        # - Align BVH ground to z=0 by lifting so its lowest point is on ground
-        # - Anchor XY near the robot pelvis so they share the same ground plane and neighborhood
-        bvh_ground = bvh_pts.copy()
-        bvh_ground[:, 2] -= float(bvh_ground[:, 2].min())
-        bvh_world = bvh_ground + np.array([float(pelvis_pos[0]), float(pelvis_pos[1]), 0.0], dtype=np.float64)
+        # Compute a constant world-space anchor from frame 0
+        num_frames = int(bvh_motion.frames.shape[0])
+        frame_time = float(bvh_motion.frame_time)
+
+        frame0_pts, _, _ = compute_bvh_frame_world_positions(bvh_root, bvh_motion, 0)
+        frame0_pts = (ROT_BVH_TO_G1 @ frame0_pts.T).T
+        # Preserve root motion; do not remove root translation
+        if scale_used is not None:
+            frame0_pts = frame0_pts * float(scale_used)
+        # Ground once using initial frame only
+        z0_offset = -float(frame0_pts[:, 2].min())
+        # Align initial root XY near robot pelvis XY once
+        root0_xy = frame0_pts[0, :2]
+        xy_offset = np.array([float(pelvis_pos[0]) - float(root0_xy[0]),
+                              float(pelvis_pos[1]) - float(root0_xy[1])], dtype=np.float64)
+        anchor_offset = np.array([xy_offset[0], xy_offset[1], z0_offset], dtype=np.float64)
 
         def _draw_bvh_overlay(scene: mujoco.MJVSCENE, pts: np.ndarray, edges: List[Tuple[int, int]], rgba: np.ndarray) -> None:
             # Reset user scene geoms
@@ -544,7 +694,18 @@ def main() -> None:
 
         with mujoco.viewer.launch_passive(model=model, data=data, show_left_ui=True, show_right_ui=True) as viewer:
             rgba = np.array([0.2, 0.6, 1.0, 1.0], dtype=np.float32)
+            start_time = time.perf_counter()
             while viewer.is_running():
+                # Determine current frame based on elapsed time
+                elapsed = time.perf_counter() - start_time
+                f = int((elapsed / frame_time) % max(1, num_frames))
+                frame_pts, _, _ = compute_bvh_frame_world_positions(bvh_root, bvh_motion, f)
+                # Apply fixed axis rotation and scaling like rest pose
+                frame_pts = (ROT_BVH_TO_G1 @ frame_pts.T).T
+                if scale_used is not None:
+                    frame_pts = frame_pts * float(scale_used)
+                # Apply constant anchor to preserve root trajectory and ground contact reference
+                bvh_world = frame_pts + anchor_offset
                 _draw_bvh_overlay(viewer.user_scn, bvh_world, bvh_edges, rgba)
                 mujoco.mj_camlight(model, data)  # keep lighting sane
                 viewer.sync()
