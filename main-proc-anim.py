@@ -5,6 +5,7 @@ import math
 import json
 import shutil
 import subprocess
+import time
 
 import mujoco
 import mujoco.viewer
@@ -569,6 +570,9 @@ if __name__ == "__main__":
             ttk.Checkbutton(self, text="Front symmetry (FL ↔ FR)", variable=self.front_sym).grid(row=row, column=0, sticky="w")
             row += 1
             ttk.Checkbutton(self, text="Rear symmetry (RL ↔ RR)", variable=self.rear_sym).grid(row=row, column=0, sticky="w")
+            row += 1
+            self.physics = tk.BooleanVar(value=False)
+            ttk.Checkbutton(self, text="Physics (bake + play)", variable=self.physics).grid(row=row, column=0, sticky="w")
 
             def _update_labels(*_a):
                 self._cycle_lbl.configure(text=f"{float(self.cycle_T.get()):.2f}")
@@ -796,6 +800,190 @@ if __name__ == "__main__":
         right_elbow_orientation_task.set_target_from_configuration(configuration)
 
         rate = RateLimiter(frequency=200.0, warn=False)
+        # Physics playback state
+        physics_enabled_prev = False
+        baked_frames: list[list[float]] | None = None
+        baked_dt_capture: float = 0.0
+        baked_total: int = 0
+        baked_t_capture: float = 0.0
+        phys_accum: float = 0.0
+        last_wall_ts: float = time.perf_counter()
+
+        # Build mapping from SLIDE/HINGE joints to same-named actuators
+        joint_to_actuator: dict[int, int] = {}
+        joint_qposadr: dict[int, int] = {}
+        for j in range(model.njnt):
+            jtype = int(model.jnt_type[j])
+            if jtype not in (2, 3):
+                continue
+            jname = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, j)
+            if jname is None:
+                continue
+            try:
+                aid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, jname)
+            except Exception:
+                aid = -1
+            if aid != -1:
+                joint_to_actuator[int(j)] = int(aid)
+                joint_qposadr[int(j)] = int(model.jnt_qposadr[j])
+
+        def _bake_animation_current() -> tuple[list[list[float]], float]:
+            """Bake one full cycle animation using current UI and configuration.
+            Returns (frames, dt_capture).
+            """
+            T = float(global_ctrl.cycle_T.get())
+            gap = float(global_ctrl.phase_gap.get())
+            duty = float(global_ctrl.duty.get())
+            torso_fwd_speed_local = float(tv_speed.get())
+
+            target_fps = 200.0
+            if T <= 1e-6:
+                T = 1e-6
+            num_steps = max(2, int(round(T * target_fps)))
+            dt = T / float(num_steps)
+            total_steps = num_steps
+
+            ui_snap = {}
+            for leg_name, ui_ctrl in {"FL": fl, "FR": fr, "RL": rl, "RR": rr}.items():
+                (plant_x, plant_y), (lift_x, lift_y) = ui_ctrl.get_endpoints()
+                ui_snap[leg_name] = {
+                    "plant_x": float(plant_x),
+                    "plant_y": float(plant_y),
+                    "lift_x": float(lift_x),
+                    "lift_y": float(lift_y),
+                    "base_z": float(ui_ctrl.base_z),
+                    "lift_h": float(ui_ctrl.get_lift_height()),
+                }
+
+            offline_cfg = mink.Configuration(model)
+            offline_cfg.data.qpos[:] = configuration.data.qpos[:]
+            mujoco.mj_forward(offline_cfg.model, offline_cfg.data)
+
+            posture_task.set_target_from_configuration(offline_cfg)
+            pelvis_orientation_task.set_target_from_configuration(offline_cfg)
+            pelvis_position_task.set_target_from_configuration(offline_cfg)
+            torso_orientation_task.set_target_from_configuration(offline_cfg)
+            left_foot_orientation_task.set_target_from_configuration(offline_cfg)
+            right_foot_orientation_task.set_target_from_configuration(offline_cfg)
+            left_knee_orientation_task.set_target_from_configuration(offline_cfg)
+            right_knee_orientation_task.set_target_from_configuration(offline_cfg)
+            left_elbow_orientation_task.set_target_from_configuration(offline_cfg)
+            right_elbow_orientation_task.set_target_from_configuration(offline_cfg)
+
+            d_off = offline_cfg.data
+
+            def _smoothstep(u: float) -> float:
+                u = 0.0 if u < 0.0 else (1.0 if u > 1.0 else u)
+                return u * u * (3.0 - 2.0 * u)
+
+            phase_offsets = {"FL": 0.0, "RR": gap, "FR": 2.0 * gap, "RL": 3.0 * gap}
+
+            pelvis_bid_local = mujoco.mj_name2id(offline_cfg.model, mujoco.mjtObj.mjOBJ_BODY, "pelvis")
+
+            free_qpos_addr_local = None
+            for j in range(offline_cfg.model.njnt):
+                if int(offline_cfg.model.jnt_type[j]) == 0:
+                    free_qpos_addr_local = int(offline_cfg.model.jnt_qposadr[j])
+                    break
+
+            base_xyz0_local = None
+            if free_qpos_addr_local is not None:
+                base_xyz0_local = (
+                    float(d_off.qpos[free_qpos_addr_local + 0]),
+                    float(d_off.qpos[free_qpos_addr_local + 1]),
+                    float(d_off.qpos[free_qpos_addr_local + 2]),
+                )
+
+            pelvis_x0_local = float(d_off.xpos[pelvis_bid_local][0]) if pelvis_bid_local != -1 else 0.0
+            pelvis_y0_local = float(d_off.xpos[pelvis_bid_local][1]) if pelvis_bid_local != -1 else 0.0
+            LEG_STATE_LOCAL: dict[str, dict[str, object]] = {}
+            for leg in ("FL", "RR", "FR", "RL"):
+                s = ui_snap[leg]
+                plant_x = s["plant_x"]
+                plant_y = s["plant_y"]
+                lift_x = s["lift_x"]
+                lift_y = s["lift_y"]
+                phi0 = phase_offsets[leg] - math.floor(phase_offsets[leg])
+                in_stance0 = bool(phi0 < duty)
+                contact_w0 = (pelvis_x0_local + float(plant_x), pelvis_y0_local + float(plant_y))
+                target_w0 = (pelvis_x0_local + float(lift_x), pelvis_y0_local + float(lift_y))
+                LEG_STATE_LOCAL[leg] = {"contact_w": contact_w0, "target_w": target_w0, "in_stance": in_stance0}
+
+            frames_local: list[list[float]] = []
+            local_solver = "daqp"
+            s_forward_local = 0.0
+
+            for k in range(total_steps):
+                t_local = float(k) * dt
+
+                if base_xyz0_local is not None and free_qpos_addr_local is not None:
+                    s_forward_local += torso_fwd_speed_local * dt
+                    d_off.qpos[free_qpos_addr_local + 0] = base_xyz0_local[0] + s_forward_local
+                    d_off.qpos[free_qpos_addr_local + 1] = base_xyz0_local[1]
+                    d_off.qpos[free_qpos_addr_local + 2] = base_xyz0_local[2]
+                    mujoco.mj_forward(offline_cfg.model, d_off)
+                    pelvis_orientation_task.set_target_from_configuration(offline_cfg)
+                    pelvis_position_task.set_target_from_configuration(offline_cfg)
+                    torso_orientation_task.set_target_from_configuration(offline_cfg)
+
+                pelvis_x_local = float(d_off.xpos[pelvis_bid_local][0]) if pelvis_bid_local != -1 else 0.0
+                pelvis_y_local = float(d_off.xpos[pelvis_bid_local][1]) if pelvis_bid_local != -1 else 0.0
+
+                for leg, mid in ("FL", left_palm_mid), ("RR", right_foot_mid), ("FR", right_palm_mid), ("RL", left_foot_mid):
+                    s = ui_snap[leg]
+                    plant_x = s["plant_x"]
+                    plant_y = s["plant_y"]
+                    lift_x = s["lift_x"]
+                    lift_y = s["lift_y"]
+                    base_z = s["base_z"]
+                    lift_h = s["lift_h"]
+
+                    phi_total = t_local / T + float(phase_offsets[leg])
+                    phi = phi_total - math.floor(phi_total)
+                    stance_now = bool(phi < duty)
+
+                    state = LEG_STATE_LOCAL[leg]
+                    if bool(state["in_stance"]) and not stance_now:
+                        state["target_w"] = (pelvis_x_local + float(lift_x), pelvis_y_local + float(lift_y))
+                    elif (not bool(state["in_stance"])) and stance_now:
+                        state["contact_w"] = tuple(state["target_w"])  # type: ignore[arg-type]
+                    state["in_stance"] = stance_now
+
+                    contact_w = tuple(state["contact_w"])  # type: ignore[arg-type]
+                    target_w = tuple(state["target_w"])    # type: ignore[arg-type]
+
+                    if stance_now:
+                        tx = float(contact_w[0]); ty = float(contact_w[1]); tz = float(base_z)
+                    else:
+                        sphi = (phi - duty) / max(1e-6, (1.0 - duty))
+                        ssm = _smoothstep(sphi)
+                        tx = (1.0 - ssm) * float(contact_w[0]) + ssm * float(target_w[0])
+                        ty = (1.0 - ssm) * float(contact_w[1]) + ssm * float(target_w[1])
+                        tz = float(base_z) + float(lift_h) * math.sin(math.pi * sphi)
+
+                    d_off.mocap_pos[mid][0] = float(tx)
+                    d_off.mocap_pos[mid][1] = float(ty)
+                    d_off.mocap_pos[mid][2] = float(tz)
+
+                right_hand_task.set_target(mink.SE3.from_mocap_id(d_off, right_palm_mid))
+                left_hand_task.set_target(mink.SE3.from_mocap_id(d_off, left_palm_mid))
+                left_foot_task.set_target(mink.SE3.from_mocap_id(d_off, left_foot_mid))
+                right_foot_task.set_target(mink.SE3.from_mocap_id(d_off, right_foot_mid))
+
+                vel_local = mink.solve_ik(offline_cfg, tasks, dt, local_solver, 1e-1, limits=limits)
+                offline_cfg.integrate_inplace(vel_local, dt)
+
+                frames_local.append([float(x) for x in d_off.qpos])
+
+            if free_qpos_addr_local is not None and len(frames_local) > 0:
+                x0 = float(frames_local[0][free_qpos_addr_local + 0])
+                y0 = float(frames_local[0][free_qpos_addr_local + 1])
+                if x0 != 0.0 or y0 != 0.0:
+                    for frame_vals in frames_local:
+                        frame_vals[free_qpos_addr_local + 0] = float(frame_vals[free_qpos_addr_local + 0]) - x0
+                        frame_vals[free_qpos_addr_local + 1] = float(frame_vals[free_qpos_addr_local + 1]) - y0
+
+            return frames_local, float(dt)
         # Free joint base address and initial base position for pelvis motion
         free_qpos_addr = None
         for j in range(model.njnt):
@@ -804,11 +992,11 @@ if __name__ == "__main__":
                 break
         base_xyz0 = None
         if free_qpos_addr is not None:
-            base_xyz0 = (
+            base_xyz0 = [
                 float(configuration.data.qpos[free_qpos_addr + 0]),
                 float(configuration.data.qpos[free_qpos_addr + 1]),
                 float(configuration.data.qpos[free_qpos_addr + 2]),
-            )
+            ]
 
         # Procedural crawl gait parameters (initial; will be updated live from UI)
         torso_fwd_speed = float(tv_speed.get())
@@ -1040,7 +1228,64 @@ if __name__ == "__main__":
             except Exception:
                 pass
 
-        ttk.Button(global_ctrl, text="Reset", command=_reset_all).grid(row=6, column=0, sticky="w", pady=(6, 0))
+        ttk.Button(global_ctrl, text="Reset", command=_reset_all).grid(row=7, column=0, sticky="w", pady=(6, 0))
+
+        # Manual recenter to origin while preserving current pose/params
+        def _recenter_now() -> None:
+            try:
+                # Only meaningful if there is a free joint
+                if base_xyz0 is None or free_qpos_addr is None:
+                    return
+                # Skip during physics playback; button is for IK mode
+                try:
+                    if hasattr(global_ctrl, "physics") and bool(global_ctrl.physics.get()):
+                        return
+                except Exception:
+                    pass
+                # Current pelvis XY in world
+                px = float(data.xpos[pelvis_bid][0]) if pelvis_bid != -1 else 0.0
+                py = float(data.xpos[pelvis_bid][1]) if pelvis_bid != -1 else 0.0
+                if abs(px) < 1e-6 and abs(py) < 1e-6:
+                    return
+                dx = float(px)
+                dy = float(py)
+                # Shift free joint XY by (-dx, -dy)
+                configuration.data.qpos[free_qpos_addr + 0] = float(configuration.data.qpos[free_qpos_addr + 0]) - dx
+                configuration.data.qpos[free_qpos_addr + 1] = float(configuration.data.qpos[free_qpos_addr + 1]) - dy
+                # Update base reference so forward motion continues smoothly
+                base_xyz0[0] = float(base_xyz0[0]) - dx
+                base_xyz0[1] = float(base_xyz0[1]) - dy
+                # Adjust world-anchored leg state and mocap targets
+                for leg in LEG_ORDER:
+                    st = LEG_STATE.get(leg)
+                    if st is not None:
+                        cw = tuple(st["contact_w"])  # type: ignore[arg-type]
+                        tw = tuple(st["target_w"])   # type: ignore[arg-type]
+                        st["contact_w"] = (float(cw[0]) - dx, float(cw[1]) - dy)
+                        st["target_w"] = (float(tw[0]) - dx, float(tw[1]) - dy)
+                for leg, mid in ("FL", left_palm_mid), ("FR", right_palm_mid), ("RL", left_foot_mid), ("RR", right_foot_mid):
+                    data.mocap_pos[mid][0] = float(data.mocap_pos[mid][0]) - dx
+                    data.mocap_pos[mid][1] = float(data.mocap_pos[mid][1]) - dy
+                mujoco.mj_forward(configuration.model, configuration.data)
+                # Refresh task targets to follow the recentered configuration
+                posture_task.set_target_from_configuration(configuration)
+                pelvis_orientation_task.set_target_from_configuration(configuration)
+                pelvis_position_task.set_target_from_configuration(configuration)
+                torso_orientation_task.set_target_from_configuration(configuration)
+                left_foot_orientation_task.set_target_from_configuration(configuration)
+                right_foot_orientation_task.set_target_from_configuration(configuration)
+                left_knee_orientation_task.set_target_from_configuration(configuration)
+                right_knee_orientation_task.set_target_from_configuration(configuration)
+                left_elbow_orientation_task.set_target_from_configuration(configuration)
+                right_elbow_orientation_task.set_target_from_configuration(configuration)
+                try:
+                    root.update_idletasks()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+        ttk.Button(global_ctrl, text="Recenter Now", command=_recenter_now).grid(row=7, column=4, sticky="w", pady=(6, 0), padx=(8, 0))
 
         # --- JSON import/export helpers (no Entry widgets; prefer Zenity) ---
         def _safe_open_json_path(parent, initialdir: Path) -> Path | None:
@@ -1214,8 +1459,8 @@ if __name__ == "__main__":
                     pass
 
         # Import/Export buttons next to Reset
-        ttk.Button(global_ctrl, text="Import…", command=_on_import).grid(row=6, column=1, sticky="w", pady=(6, 0), padx=(8, 0))
-        ttk.Button(global_ctrl, text="Export", command=_on_export).grid(row=6, column=2, sticky="w", pady=(6, 0), padx=(8, 0))
+        ttk.Button(global_ctrl, text="Import…", command=_on_import).grid(row=7, column=1, sticky="w", pady=(6, 0), padx=(8, 0))
+        ttk.Button(global_ctrl, text="Export", command=_on_export).grid(row=7, column=2, sticky="w", pady=(6, 0), padx=(8, 0))
 
         def _on_export_animation() -> None:
                 # Snapshot current UI parameters
@@ -1534,7 +1779,7 @@ if __name__ == "__main__":
 
                 messagebox.showinfo("Export Animation", f"Saved animation to {path.name} ({len(frames)} frames)")
 
-        ttk.Button(global_ctrl, text="Export Animation", command=_on_export_animation).grid(row=6, column=3, sticky="w", pady=(6, 0), padx=(8, 0))
+        ttk.Button(global_ctrl, text="Export Animation", command=_on_export_animation).grid(row=7, column=3, sticky="w", pady=(6, 0), padx=(8, 0))
 
         while viewer.is_running():
             # Pump Tk UI
@@ -1543,6 +1788,83 @@ if __name__ == "__main__":
                 root.update()
             except Exception:
                 pass
+
+            # Handle Physics toggle: bake once and drive actuators from baked frames
+            physics_now = hasattr(global_ctrl, "physics") and bool(global_ctrl.physics.get())
+            if physics_now and not physics_enabled_prev:
+                try:
+                    baked_frames, baked_dt_capture = _bake_animation_current()
+                    baked_total = len(baked_frames)
+                    baked_t_capture = 0.0
+                    phys_accum = 0.0
+                    last_wall_ts = time.perf_counter()
+                    if baked_total > 0:
+                        f0_local = baked_frames[0]
+                        for j in range(model.nq):
+                            data.qpos[j] = float(f0_local[j])
+                        for j in range(model.nv):
+                            data.qvel[j] = 0.0
+                        for i in range(model.nu):
+                            data.ctrl[i] = 0.0
+                        mujoco.mj_forward(model, data)
+                except Exception:
+                    physics_now = False
+            elif (not physics_now) and physics_enabled_prev:
+                # Transitioning from physics back to IK: preserve current pose and parameters
+                try:
+                    for i in range(model.nq):
+                        configuration.data.qpos[i] = float(data.qpos[i])
+                    mujoco.mj_forward(configuration.model, configuration.data)
+                    # Refresh task targets to match the carried-over configuration
+                    posture_task.set_target_from_configuration(configuration)
+                    pelvis_orientation_task.set_target_from_configuration(configuration)
+                    pelvis_position_task.set_target_from_configuration(configuration)
+                    torso_orientation_task.set_target_from_configuration(configuration)
+                    left_foot_orientation_task.set_target_from_configuration(configuration)
+                    right_foot_orientation_task.set_target_from_configuration(configuration)
+                    left_knee_orientation_task.set_target_from_configuration(configuration)
+                    right_knee_orientation_task.set_target_from_configuration(configuration)
+                    left_elbow_orientation_task.set_target_from_configuration(configuration)
+                    right_elbow_orientation_task.set_target_from_configuration(configuration)
+                except Exception:
+                    pass
+
+            physics_enabled_prev = physics_now
+
+            if physics_now and baked_frames is not None and baked_total > 1:
+                now_ts = time.perf_counter()
+                dt_wall = now_ts - last_wall_ts
+                last_wall_ts = now_ts
+                phys_accum += dt_wall
+
+                while phys_accum >= model.opt.timestep:
+                    baked_t_capture += model.opt.timestep
+                    u = baked_t_capture / max(1e-9, baked_dt_capture)
+                    i0 = int(math.floor(u)) % baked_total
+                    alpha = u - math.floor(u)
+                    i1 = (i0 + 1) % baked_total
+                    f0 = baked_frames[i0]
+                    f1 = baked_frames[i1]
+                    for j_id, aid in joint_to_actuator.items():
+                        adr = joint_qposadr[j_id]
+                        a = float(f0[adr]); b = float(f1[adr])
+                        target = (1.0 - alpha) * a + alpha * b
+                        data.ctrl[aid] = float(target)
+                    mujoco.mj_step(model, data)
+                    phys_accum -= model.opt.timestep
+
+                try:
+                    if pelvis_bid != -1:
+                        viewer.cam.lookat[0] = float(data.xpos[pelvis_bid][0])
+                        viewer.cam.lookat[1] = float(data.xpos[pelvis_bid][1])
+                        viewer.cam.lookat[2] = float(data.xpos[pelvis_bid][2])
+                except Exception:
+                    pass
+
+                mujoco.mj_camlight(model, data)
+                viewer.sync()
+                rate.sleep()
+                continue
 
             # Refresh parameters from UI each frame
             torso_fwd_speed = float(tv_speed.get())
@@ -1574,6 +1896,19 @@ if __name__ == "__main__":
             # Current pelvis world position
             pelvis_x = float(data.xpos[pelvis_bid][0]) if pelvis_bid != -1 else 0.0
             pelvis_y = float(data.xpos[pelvis_bid][1]) if pelvis_bid != -1 else 0.0
+
+            # Auto recentre if we drift too far from origin in IK mode
+            # Keep visualization near ground plane center without resetting parameters
+            try:
+                RECENTER_RADIUS = 3.0  # meters
+                if base_xyz0 is not None and free_qpos_addr is not None and not (hasattr(global_ctrl, "physics") and bool(global_ctrl.physics.get())):
+                    if math.hypot(pelvis_x, pelvis_y) > RECENTER_RADIUS:
+                        _recenter_now()
+                        # Recompute pelvis position after recenter
+                        pelvis_x = float(data.xpos[pelvis_bid][0]) if pelvis_bid != -1 else 0.0
+                        pelvis_y = float(data.xpos[pelvis_bid][1]) if pelvis_bid != -1 else 0.0
+            except Exception:
+                pass
 
             for leg in LEG_ORDER:
                 ui = LEG_TO_UI[leg]

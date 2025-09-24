@@ -26,3 +26,9 @@ export CYCLONEDDS_HOME="$HOME/cyclonedds/install"
 ### Dev warning: Tkinter + MuJoCo threading
 - Avoid `ttk.Entry`/`tk.Entry` with the MuJoCo viewer (can crash XCB). Use `ttk.Label` displays with variable traces instead.
 - Defer `mujoco.*` calls that depend on the viewer until after the viewer is launched. `main.py` follows these patterns.
+
+### New reference
+- `scripts/mink_g1_ik_reference.py`: concise, modern Mink IK example for G1 with mocap targets. Run:
+```bash
+uv run scripts/mink_g1_ik_reference.py
+```

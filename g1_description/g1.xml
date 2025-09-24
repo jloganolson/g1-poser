@@ -1,8 +1,8 @@
 <mujoco model="g1_23dof_rev_1_0">
   <compiler angle="radian" meshdir="meshes"/>
 
-  <option iterations="3" ls_iterations="5" timestep=".002" integrator="Euler">
-    <flag eulerdamp="disable"/>
+  <option iterations="3" ls_iterations="5" timestep=".005" integrator="Euler">
+    <!-- <flag eulerdamp="disable"/> -->
   </option>
 
   <default>
