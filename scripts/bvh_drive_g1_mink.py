@@ -13,6 +13,7 @@ import mujoco.viewer
 from loop_rate_limiters import RateLimiter
 
 import mink
+import threading
 
 
 # ----------------------------- Static configuration -----------------------------
@@ -37,9 +38,10 @@ ROT_BVH_TO_G1 = np.array(
 )
 
 # Scaling options
-AUTO_SCALE = True
-BVH_SCALE: Optional[float] = None  # If set, overrides AUTO_SCALE
-SHOULDER_SCALE = True
+# Default to a fixed manual scale; disable auto-scaling heuristics.
+AUTO_SCALE = False
+BVH_SCALE: Optional[float] = 0.01  # Initial default scale
+SHOULDER_SCALE = False
 WINGSPAN_SCALE = False
 
 # Viewer overlay
@@ -456,10 +458,9 @@ def main() -> None:
     left_foot_orientation_task.set_target_from_configuration(configuration)
     right_foot_orientation_task.set_target_from_configuration(configuration)
 
-    # Precompute scaling from shoulder height parity using rest-skeleton points
-    # Use frame 0 for anchor and ground ref
-    frame0_pts, bvh_edges, frame0_names = compute_bvh_frame_world_positions(bvh_root, bvh_motion, 0)
-    frame0_pts = (ROT_BVH_TO_G1 @ frame0_pts.T).T
+    # Precompute rest points (unscaled) for anchor computation and name mapping
+    frame0_pts_unscaled, bvh_edges, frame0_names = compute_bvh_frame_world_positions(bvh_root, bvh_motion, 0)
+    frame0_pts_unscaled = (ROT_BVH_TO_G1 @ frame0_pts_unscaled.T).T
 
     scale_used: Optional[float] = None
     if BVH_SCALE is not None:
@@ -474,16 +475,16 @@ def main() -> None:
             z_right = float(data.xpos[r_bid][2])
             z_g1_shoulder = 0.5 * (z_left + z_right)
             # Estimate BVH shoulder height from lateral extremes
-            z_bvh_shoulder = _estimate_bvh_arm_height(frame0_pts, k=3)
+            z_bvh_shoulder = _estimate_bvh_arm_height(frame0_pts_unscaled, k=3)
             if z_bvh_shoulder is None:
                 raise RuntimeError("Failed to estimate BVH shoulder height from points.")
-            z_bvh_ground = float(frame0_pts[:, 2].min())
+            z_bvh_ground = float(frame0_pts_unscaled[:, 2].min())
             rel_bvh_shoulder = float(z_bvh_shoulder - z_bvh_ground)
             if rel_bvh_shoulder <= 1e-9:
                 raise RuntimeError("Non-positive BVH shoulder-ground height; cannot scale.")
             scale_used = float(z_g1_shoulder / rel_bvh_shoulder)
         elif WINGSPAN_SCALE:
-            wingspan_bvh = _compute_wingspan_from_points(frame0_pts)
+            wingspan_bvh = _compute_wingspan_from_points(frame0_pts_unscaled)
             # Approximate G1 wingspan as palm distance if sites exist
             lp_sid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "left_palm")
             rp_sid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "right_palm")
@@ -494,16 +495,63 @@ def main() -> None:
                 raise RuntimeError("Invalid wingspan(s); cannot scale.")
             scale_used = float(wingspan_g1 / wingspan_bvh)
 
-    if scale_used is not None:
-        frame0_pts = frame0_pts * float(scale_used)
+    # Live scale UI using ttk.Scale (no Entry widgets to avoid XCB issues)
+    class _ScaleUI:
+        def __init__(self, initial_value: float, min_value: float, max_value: float) -> None:
+            self._value = float(initial_value)
+            self._lock = threading.Lock()
+            self._ready = threading.Event()
+            self._min = float(min_value)
+            self._max = float(max_value)
 
-    # Compute anchor: ground once and align initial root XY to pelvis XY
-    pelvis_bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "pelvis")
-    pelvis_pos = np.array(data.xpos[pelvis_bid], dtype=np.float64) if pelvis_bid >= 0 else np.zeros(3)
-    z0_offset = -float(frame0_pts[:, 2].min())
-    root0_xy = frame0_pts[0, :2]
-    xy_offset = np.array([float(pelvis_pos[0]) - float(root0_xy[0]), float(pelvis_pos[1]) - float(root0_xy[1])], dtype=np.float64)
-    anchor_offset = np.array([xy_offset[0], xy_offset[1], z0_offset], dtype=np.float64)
+        def start(self) -> None:
+            def _run() -> None:
+                import tkinter as tk
+                from tkinter import ttk
+                root = tk.Tk()
+                root.title("BVH Scale")
+                var = tk.DoubleVar(value=float(self._value))
+                label = ttk.Label(root, text=f"Scale: {float(var.get()):.3f}", anchor="e")
+                label.pack(fill="x", padx=8, pady=6)
+                def _on_change(*_args: object) -> None:
+                    val = float(var.get())
+                    with self._lock:
+                        self._value = val
+                    label.configure(text=f"Scale: {val:.3f}")
+                var.trace_add("write", _on_change)
+                scale = ttk.Scale(root, from_=self._min, to=self._max, orient="horizontal", variable=var)
+                scale.pack(fill="x", padx=8, pady=6)
+                self._ready.set()
+                root.mainloop()
+            t = threading.Thread(target=_run, daemon=True)
+            t.start()
+            self._ready.wait(timeout=2.0)
+
+        def get(self) -> float:
+            with self._lock:
+                return float(self._value)
+
+    # Base scale from computed scale or manual override; slider controls absolute value
+    base_scale = float(BVH_SCALE) if BVH_SCALE is not None else (float(scale_used) if scale_used is not None else 1.0)
+    # Slider range: narrow +/- 0.002 around base scale (e.g., default ~0.008)
+    min_scale = max(1e-4, base_scale - 0.002)
+    max_scale = base_scale + 0.002
+    ui = _ScaleUI(initial_value=base_scale, min_value=min_scale, max_value=max_scale)
+    ui.start()
+
+    # Compute initial anchor targets based on frame 0 and pelvis position
+    pelvis_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "pelvis")
+    pelvis_xy0 = np.array(data.xpos[pelvis_id][0:2], dtype=np.float64) if pelvis_id >= 0 else np.zeros(2)
+    target_ground_z = 0.0
+
+    def _compute_anchor_for_targets(scale: float, ref_pts_unscaled: np.ndarray, target_xy: np.ndarray, target_zmin: float) -> np.ndarray:
+        scaled = ref_pts_unscaled * float(scale)
+        a_xy = target_xy - scaled[0, 0:2]
+        a_z = float(target_zmin) - float(scaled[:, 2].min())
+        return np.array([a_xy[0], a_xy[1], a_z], dtype=np.float64)
+
+    anchor_offset = _compute_anchor_for_targets(base_scale, frame0_pts_unscaled, pelvis_xy0, target_ground_z)
+    prev_scale = float(base_scale)
 
     # Build BVH name -> index for extremities using hints
     left_hand_idx = _find_bvh_index_by_hints(frame0_names, BVH_LEFT_HAND_HINTS)
@@ -515,6 +563,8 @@ def main() -> None:
     with mujoco.viewer.launch_passive(model=model, data=data, show_left_ui=True, show_right_ui=True) as viewer:
         mujoco.mjv_defaultFreeCamera(model, viewer.cam)
         try:
+            # Ensure pelvis body id variable exists for camera tracking and later resets
+            pelvis_bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "pelvis")
             if pelvis_bid != -1:
                 viewer.cam.type = mujoco.mjtCamera.mjCAMERA_TRACKING
                 viewer.cam.trackbodyid = int(pelvis_bid)
@@ -553,12 +603,43 @@ def main() -> None:
             elapsed = time.perf_counter() - start_time
             f = int((elapsed / frame_time) % max(1, num_frames))
 
-            # Compute BVH world points for current frame
-            frame_pts, _, _ = compute_bvh_frame_world_positions(bvh_root, bvh_motion, f)
-            frame_pts = (ROT_BVH_TO_G1 @ frame_pts.T).T
-            if scale_used is not None:
-                frame_pts = frame_pts * float(scale_used)
-            bvh_world = frame_pts + anchor_offset
+            # Live scale from UI; if changed, reset: restart time, recompute anchor from frame 0 and current pelvis XY,
+            # and reinitialize task and mocap targets based on frame 0.
+            live_scale = float(ui.get())
+            if abs(live_scale - prev_scale) > 1e-6:
+                # Restart animation from frame 0
+                start_time = time.perf_counter()
+                f = 0
+                # Re-anchor using frame 0 and current pelvis XY, ground z=0
+                pelvis_xy_now = np.array(data.xpos[pelvis_bid][0:2], dtype=np.float64) if pelvis_bid >= 0 else np.zeros(2)
+                anchor_offset = _compute_anchor_for_targets(live_scale, frame0_pts_unscaled, pelvis_xy_now, 0.0)
+                prev_scale = float(live_scale)
+                # Reinitialize IK task targets
+                mujoco.mj_forward(configuration.model, configuration.data)
+                posture_task.set_target_from_configuration(configuration)
+                pelvis_orientation_task.set_target_from_configuration(configuration)
+                pelvis_position_task.set_target_from_configuration(configuration)
+                torso_orientation_task.set_target_from_configuration(configuration)
+                left_foot_orientation_task.set_target_from_configuration(configuration)
+                right_foot_orientation_task.set_target_from_configuration(configuration)
+                # Reset mocap to frame 0 world positions (if mocap bodies exist)
+                f0_pts_us, _, _ = compute_bvh_frame_world_positions(bvh_root, bvh_motion, 0)
+                f0_pts_us = (ROT_BVH_TO_G1 @ f0_pts_us.T).T
+                f0_world = f0_pts_us * float(live_scale) + anchor_offset
+                if right_palm_mid != -1:
+                    data.mocap_pos[right_palm_mid][0:3] = f0_world[right_hand_idx]
+                if left_palm_mid != -1:
+                    data.mocap_pos[left_palm_mid][0:3] = f0_world[left_hand_idx]
+                if left_foot_mid != -1:
+                    data.mocap_pos[left_foot_mid][0:3] = f0_world[left_foot_idx]
+                if right_foot_mid != -1:
+                    data.mocap_pos[right_foot_mid][0:3] = f0_world[right_foot_idx]
+
+            # Compute BVH world points for current frame after any reset
+            frame_pts_us, _, _ = compute_bvh_frame_world_positions(bvh_root, bvh_motion, f)
+            frame_pts_us = (ROT_BVH_TO_G1 @ frame_pts_us.T).T
+            frame_pts_scaled = frame_pts_us * float(live_scale)
+            bvh_world = frame_pts_scaled + anchor_offset
 
             # Draw BVH overlay in viewer
             _draw_bvh_overlay(viewer.user_scn, bvh_world, bvh_edges, np.array([0.2, 0.6, 1.0, 1.0], dtype=np.float32))
