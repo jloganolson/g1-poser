@@ -222,7 +222,7 @@
           <geom pos="0.0039635 0 -0.044" class="visual" mesh="torso_link_23dof_rev_1_0"/>
           <geom pos="0.0039635 0 -0.044" quat="1 0 0 0" class="visual" material="black" mesh="logo_link"/>
           <geom pos="0.0039635 0 -0.044" class="visual" material="black" mesh="head_link"/>
-          <!-- <site name="head" pos="0.0039635 0 -0.044" size="0.01"/> -->
+          <!-- <site name="head" pos="0 0 5.2" size="0.1"/> -->
           <geom name="torso_collision_main" class="collision" type="box" pos="0.008492 -0.000006 0.134067" size="0.075135 0.107701 0.177918"/>
           <site name="imu_in_torso" pos="-0.03959 -0.00224 0.14792"/>
           <body name="left_shoulder_pitch_link" pos="0.0039563 0.10022 0.24778"

@@ -220,6 +220,64 @@ def _apply_t_pose(model: mujoco.MjModel, data: mujoco.MjData) -> None:
     mujoco.mj_forward(model, data)
 
 
+def _auto_straighten_elbows(model: mujoco.MjModel, data: mujoco.MjData) -> None:
+    """Numerically choose elbow angles that make forearms colinear with upper arms.
+
+    This avoids guessing the model's elbow zero and works across XML variants.
+    """
+
+    def _straighten_one(elbow_joint: str, elbow_body: str, wrist_site: str, shoulder_body: str) -> None:
+        try:
+            jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, elbow_joint)
+            if jid < 0:
+                return
+            if int(model.jnt_type[jid]) != mujoco.mjtJoint.mjJNT_HINGE:
+                return
+            qadr = int(model.jnt_qposadr[jid])
+
+            # Search range: use joint limit if available, otherwise a safe fallback
+            has_lim = bool(int(model.jnt_limited[jid])) if hasattr(model, "jnt_limited") else True
+            if has_lim:
+                a_min = float(model.jnt_range[jid][0])
+                a_max = float(model.jnt_range[jid][1])
+            else:
+                a_min, a_max = -math.pi, math.pi
+
+            elbow_bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, elbow_body)
+            shoulder_bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, shoulder_body)
+            wrist_sid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, wrist_site)
+            if elbow_bid < 0 or shoulder_bid < 0 or wrist_sid < 0:
+                return
+
+            best_angle = float(data.qpos[qadr])
+            best_cost = 1e9
+
+            # Coarse grid search is robust and cheap for a single DoF
+            for a in np.linspace(a_min, a_max, 121, dtype=np.float64):
+                data.qpos[qadr] = float(a)
+                mujoco.mj_forward(model, data)
+                u = np.array(data.xpos[elbow_bid] - data.xpos[shoulder_bid], dtype=np.float64)
+                v = np.array(data.site_xpos[wrist_sid] - data.xpos[elbow_bid], dtype=np.float64)
+                nu = float(np.linalg.norm(u))
+                nv = float(np.linalg.norm(v))
+                if nu <= 1e-9 or nv <= 1e-9:
+                    continue
+                dot = float(np.dot(u / nu, v / nv))
+                cost = 1.0 - dot  # prefer same direction (dot -> 1)
+                if cost < best_cost:
+                    best_cost = cost
+                    best_angle = float(a)
+
+            data.qpos[qadr] = float(best_angle)
+            mujoco.mj_forward(model, data)
+        except Exception:
+            # Fail loudly would interrupt usage; keep best-effort here
+            pass
+
+    _straighten_one("left_elbow_joint", "left_elbow_link", "left_palm", "left_shoulder_yaw_link")
+    _straighten_one("right_elbow_joint", "right_elbow_link", "right_palm", "right_shoulder_yaw_link")
+
+
 def _extract_g1_body_positions(model: mujoco.MjModel, data: mujoco.MjData) -> Tuple[np.ndarray, List[Tuple[int, int]], List[str], Dict[int, int]]:
     """Extract body world positions and edges from current MuJoCo state.
 
@@ -282,6 +340,47 @@ def _get_site_positions(model: mujoco.MjModel, data: mujoco.MjData, site_names: 
 
 # ----------------------------- Plotting -----------------------------
 
+def _compute_wingspan_from_points(points: np.ndarray) -> float:
+    """Compute lateral span (Y-axis extent) as a proxy for wingspan.
+
+    Assumes points are expressed in G1 coordinates where +Y is left/right.
+    """
+    if points.size == 0:
+        return 0.0
+    y_min = float(points[:, 1].min())
+    y_max = float(points[:, 1].max())
+    return max(0.0, y_max - y_min)
+
+
+def _compute_g1_wingspan(g1_points: np.ndarray, extremity_sites: Dict[str, np.ndarray]) -> float:
+    """Prefer palm site distance; fallback to lateral extent of body points."""
+    try:
+        lp = extremity_sites.get("left_palm")
+        rp = extremity_sites.get("right_palm")
+        if lp is not None and rp is not None:
+            return float(np.linalg.norm(lp - rp))
+    except Exception:
+        pass
+    return _compute_wingspan_from_points(g1_points)
+
+
+def _estimate_bvh_arm_height(points: np.ndarray, k: int = 3) -> Optional[float]:
+    """Estimate arm height in T-pose from lateral extremes in Y.
+
+    Heuristic: take mean Z of the k-most left and k-most right points by Y.
+    """
+    if points.size == 0:
+        return None
+    k = max(1, int(k))
+    order = np.argsort(points[:, 1])  # ascending by Y
+    left_idxs = order[:k]
+    right_idxs = order[-k:]
+    zs = np.concatenate([points[left_idxs, 2], points[right_idxs, 2]])
+    if zs.size == 0:
+        return None
+    return float(np.mean(zs))
+
+
 def _set_axes_equal(ax: plt.Axes, xyz_min: np.ndarray, xyz_max: np.ndarray) -> None:
     extents = xyz_max - xyz_min
     max_size = float(np.max(extents))
@@ -324,8 +423,10 @@ def main() -> None:
     OUT_PATH = os.path.join(BASE_DIR, "output", "compare_bvh_g1.png")
 
     OVERLAY = True            # If False, renders side-by-side
-    AUTO_SCALE = True         # Scale BVH to match G1 median bone length
+    AUTO_SCALE = True         # Enable automatic scaling
     BVH_SCALE: Optional[float] = None  # Manual override scale (takes precedence if set)
+    SHOULDER_SCALE = True     # If True and AUTO_SCALE, scale by shoulder height parity
+    WINGSPAN_SCALE = False    # Keep available but disabled by default
     INTERACTIVE_VIEWER = True  # If True, open MuJoCo viewer (no physics) and draw BVH overlay
     LINE_RADIUS = 0.006        # Line radius for BVH connectors in viewer
 
@@ -346,7 +447,7 @@ def main() -> None:
 
     # --- BVH ---
     bvh_root = load_bvh_hierarchy(bvh_path)
-    bvh_pts, bvh_edges, _ = compute_bvh_rest_world_positions(bvh_root)
+    bvh_pts, bvh_edges, bvh_names = compute_bvh_rest_world_positions(bvh_root)
     # Apply single-step axis rotation
     bvh_pts = (ROT_BVH_TO_G1 @ bvh_pts.T).T
 
@@ -358,7 +459,9 @@ def main() -> None:
     data = mujoco.MjData(model)
     # Set an approximate T-pose before computing positions
     _apply_t_pose(model, data)
-    g1_pts, g1_edges, _, _ = _extract_g1_body_positions(model, data)
+    # Ensure elbows are fully extended for a clean T-pose
+    _auto_straighten_elbows(model, data)
+    g1_pts, g1_edges, g1_names, _ = _extract_g1_body_positions(model, data)
     # Pelvis information and normalized arrays for matplotlib path
     pelvis_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "pelvis")
     if pelvis_id >= 0:
@@ -375,21 +478,39 @@ def main() -> None:
     if pelvis_id >= 0:
         extremity_sites = {k: (v - pelvis_pos) for k, v in extremity_sites.items()}
 
-    # Optional scaling to make sizes comparable
+    # Optional scaling to make sizes comparable (no silent fallbacks)
     scale_used: Optional[float] = None
+    scale_method: Optional[str] = None
     if BVH_SCALE is not None:
         scale_used = float(BVH_SCALE)
+        scale_method = "manual"
     elif AUTO_SCALE:
-        def median_edge_length(pts: np.ndarray, e: List[Tuple[int, int]]) -> float:
-            if not e:
-                return 1.0
-            lens = [float(np.linalg.norm(pts[i] - pts[j])) for (i, j) in e]
-            lens_sorted = sorted(lens)
-            m = lens_sorted[len(lens_sorted)//2] if lens_sorted else 1.0
-            return max(m, 1e-6)
-        m_bvh = median_edge_length(bvh_pts, bvh_edges)
-        m_g1 = median_edge_length(g1_pts, g1_edges)
-        scale_used = float(m_g1 / m_bvh)
+        if SHOULDER_SCALE:
+            # G1 shoulder height from body positions (fail loudly if missing)
+            l_bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "left_shoulder_yaw_link")
+            r_bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "right_shoulder_yaw_link")
+            if l_bid < 0 or r_bid < 0:
+                raise RuntimeError("Required shoulder bodies not found in G1 model.")
+            z_left = float(data.xpos[l_bid][2])
+            z_right = float(data.xpos[r_bid][2])
+            z_g1_shoulder = 0.5 * (z_left + z_right)
+            # BVH shoulder height estimated from lateral extremes relative to BVH ground
+            z_bvh_shoulder = _estimate_bvh_arm_height(bvh_pts, k=3)
+            if z_bvh_shoulder is None:
+                raise RuntimeError("Failed to estimate BVH shoulder height from points.")
+            z_bvh_ground = float(bvh_pts[:, 2].min())
+            rel_bvh_shoulder = float(z_bvh_shoulder - z_bvh_ground)
+            if rel_bvh_shoulder <= 1e-9:
+                raise RuntimeError("Non-positive BVH shoulder-ground height; cannot scale.")
+            scale_used = float(z_g1_shoulder / rel_bvh_shoulder)
+            scale_method = "shoulder-height"
+        elif WINGSPAN_SCALE:
+            wingspan_bvh = _compute_wingspan_from_points(bvh_pts)
+            wingspan_g1 = _compute_g1_wingspan(g1_pts, extremity_sites)
+            if wingspan_bvh <= 1e-9 or wingspan_g1 <= 1e-9:
+                raise RuntimeError("Invalid wingspan(s); cannot scale.")
+            scale_used = float(wingspan_g1 / wingspan_bvh)
+            scale_method = "wingspan"
     if scale_used is not None:
         bvh_pts = bvh_pts * float(scale_used)
 
@@ -434,7 +555,10 @@ def main() -> None:
         ax = fig.add_subplot(111, projection="3d")
         title = "BVH (blue) overlaid with G1 (orange)"
         if scale_used is not None:
-            title += f"  [bvh-scale={scale_used:.3f}]"
+            extra = f"bvh-scale={scale_used:.3f}"
+            if scale_method:
+                extra += f" by {scale_method}"
+            title += f"  [{extra}]"
         plot_skeleton(ax, bvh_pts, bvh_edges, color="#1f77b4", title=title, label="BVH")
         plot_skeleton(ax, g1_pts, g1_edges, color="#ff7f0e", title="", label="G1")
         if extremity_sites:
