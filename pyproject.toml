@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "loop-rate-limiters>=1.2.0",
+    "matplotlib>=3.10.6",
     "mink>=0.0.12",
     "mujoco>=3.3.5",
     "unitree-sdk2py",

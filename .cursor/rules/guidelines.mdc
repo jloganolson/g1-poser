@@ -1,0 +1,8 @@
+---
+description: General guidelines
+globs:
+alwaysApply: true
+---
+Use `uv run` to run with our .venv
+Do not use args on CLI - just hardcode things we may want to change/alter as static variables at the top of scripts
+Do not fail quietly (e.g. try statements) - fail quickly and loudly
