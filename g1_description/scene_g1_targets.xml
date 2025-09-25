@@ -33,6 +33,22 @@
       <geom type="box" size=".035 .035 .02" contype="0" conaffinity="0" rgba="0.2 0.2 0.6 0.25"/>
       <site type="sphere" size="0.008" rgba="0 0 1 1" group="1"/>
     </body>
+
+    <!-- Pelvis target (mocap) -->
+    <body name="pelvis_target" pos="0.0 0.0 0.9" quat="1 0 0 0" mocap="true">
+      <geom type="capsule" size=".03 .01" contype="0" conaffinity="0" rgba="0.6 0.6 0.2 0.25"/>
+      <site type="sphere" size="0.008" rgba="0.8 0.8 0.2 1" group="1"/>
+    </body>
+
+    <!-- Shoulder targets (mocap) -->
+    <body name="left_shoulder_target" pos="0.2 0.25 1.2" quat="1 0 0 0" mocap="true">
+      <geom type="box" size=".03 .03 .03" contype="0" conaffinity="0" rgba="0.6 0.2 0.6 0.25"/>
+      <site type="sphere" size="0.008" rgba="1 0 1 1" group="1"/>
+    </body>
+    <body name="right_shoulder_target" pos="0.2 -0.25 1.2" quat="1 0 0 0" mocap="true">
+      <geom type="box" size=".03 .03 .03" contype="0" conaffinity="0" rgba="0.2 0.6 0.6 0.25"/>
+      <site type="sphere" size="0.008" rgba="0 1 1 1" group="1"/>
+    </body>
   </worldbody>
 </mujoco>
 

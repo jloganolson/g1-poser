@@ -47,11 +47,14 @@ WINGSPAN_SCALE = False
 # Viewer overlay
 LINE_RADIUS = 0.006
 
-# BVH name hints for extremities; we try these in order (case-insensitive substring)
-BVH_LEFT_HAND_HINTS = ["lefthand", "left_wrist", "l_hand", "l_wrist", "hand_l", "wrist_l"]
-BVH_RIGHT_HAND_HINTS = ["righthand", "right_wrist", "r_hand", "r_wrist", "hand_r", "wrist_r"]
-BVH_LEFT_FOOT_HINTS = ["leftfoot", "left_ankle", "l_foot", "l_ankle", "foot_l", "ankle_l"]
-BVH_RIGHT_FOOT_HINTS = ["rightfoot", "right_ankle", "r_foot", "r_ankle", "foot_r", "ankle_r"]
+# BVH node names (exact, case-insensitive). Static per provided BVH.
+BVH_LEFT_HAND_NAME = "left_wrist"
+BVH_RIGHT_HAND_NAME = "right_wrist"
+BVH_LEFT_FOOT_NAME = "left_ankle"
+BVH_RIGHT_FOOT_NAME = "right_ankle"
+BVH_PELVIS_NAME = "pelvis"
+BVH_LEFT_SHOULDER_NAME = "left_shoulder"
+BVH_RIGHT_SHOULDER_NAME = "right_shoulder"
 
 
 # ----------------------------- Minimal BVH utilities -----------------------------
@@ -408,6 +411,13 @@ def _resolve_mocap_id_or_neg1(model: mujoco.MjModel, body_name: str) -> int:
         return -1
 
 
+def _resolve_required_mocap_id(model: mujoco.MjModel, body_name: str) -> int:
+    mid = _resolve_mocap_id_or_neg1(model, body_name)
+    if mid == -1:
+        raise RuntimeError(f"Required mocap body '{body_name}' not found in model.")
+    return mid
+
+
 def _shift_base_z_to_ground(model: mujoco.MjModel, data: mujoco.MjData, left_site: str, right_site: str) -> None:
     try:
         free_qpos_addr = None
@@ -433,19 +443,12 @@ def _shift_base_z_to_ground(model: mujoco.MjModel, data: mujoco.MjData, left_sit
         pass
 
 
-def _find_bvh_index_by_hints(names: List[str], hints: List[str]) -> int:
+def _find_bvh_index_by_name(names: List[str], wanted_name: str) -> int:
     lname_to_idx = {n.lower(): i for i, n in enumerate(names)}
-    # Direct substring scan in list order
-    for hint in hints:
-        h = hint.lower()
-        for i, n in enumerate(names):
-            if h in n.lower():
-                return i
-    # Also allow exact matches if provided
-    for hint in hints:
-        if hint.lower() in lname_to_idx:
-            return lname_to_idx[hint.lower()]
-    raise RuntimeError(f"Could not find BVH node matching any of: {hints}")
+    key = wanted_name.lower()
+    if key not in lname_to_idx:
+        raise RuntimeError(f"Required BVH node '{wanted_name}' not found. Available: {list(lname_to_idx.keys())[:10]} ...")
+    return lname_to_idx[key]
 
 
 def main() -> None:
@@ -487,6 +490,23 @@ def main() -> None:
         )),
         (posture_task := mink.PostureTask(model, cost=1e-1)),
     ]
+
+    # Shoulder tracking tasks (follow mocap targets when present)
+    left_shoulder_task = mink.FrameTask(
+        frame_name="left_shoulder_yaw_link",
+        frame_type="body",
+        position_cost=8.0,
+        orientation_cost=2.0,
+        lm_damping=1.0,
+    )
+    right_shoulder_task = mink.FrameTask(
+        frame_name="right_shoulder_yaw_link",
+        frame_type="body",
+        position_cost=8.0,
+        orientation_cost=2.0,
+        lm_damping=1.0,
+    )
+    tasks.extend([left_shoulder_task, right_shoulder_task])
 
     HAND_POSITION_COST = 25.0
     FOOT_POSITION_COST = 30.0
@@ -542,10 +562,24 @@ def main() -> None:
     mujoco.mj_forward(configuration.model, configuration.data)
 
     # Resolve mocap bodies for driving targets
-    right_palm_mid = _resolve_mocap_id_or_neg1(model, "right_palm_target")
-    left_palm_mid = _resolve_mocap_id_or_neg1(model, "left_palm_target")
-    left_foot_mid = _resolve_mocap_id_or_neg1(model, "left_foot_target")
-    right_foot_mid = _resolve_mocap_id_or_neg1(model, "right_foot_target")
+    right_palm_mid = _resolve_required_mocap_id(model, "right_palm_target")
+    left_palm_mid = _resolve_required_mocap_id(model, "left_palm_target")
+    left_foot_mid = _resolve_required_mocap_id(model, "left_foot_target")
+    right_foot_mid = _resolve_required_mocap_id(model, "right_foot_target")
+    pelvis_mid = _resolve_required_mocap_id(model, "pelvis_target")
+    left_shoulder_mid = _resolve_required_mocap_id(model, "left_shoulder_target")
+    right_shoulder_mid = _resolve_required_mocap_id(model, "right_shoulder_target")
+
+    # All targets are required; fail fast if any are missing
+    assert min(
+        right_palm_mid,
+        left_palm_mid,
+        left_foot_mid,
+        right_foot_mid,
+        pelvis_mid,
+        left_shoulder_mid,
+        right_shoulder_mid,
+    ) >= 0, "Required mocap targets not found in model"
 
     # Initial base alignment to ground
     _shift_base_z_to_ground(model, data, left_site="left_foot", right_site="right_foot")
@@ -654,11 +688,16 @@ def main() -> None:
     anchor_offset = _compute_anchor_for_targets(base_scale, frame0_pts_unscaled, pelvis_xy0, target_ground_z)
     prev_scale = float(base_scale)
 
-    # Build BVH name -> index for extremities using hints
-    left_hand_idx = _find_bvh_index_by_hints(frame0_names, BVH_LEFT_HAND_HINTS)
-    right_hand_idx = _find_bvh_index_by_hints(frame0_names, BVH_RIGHT_HAND_HINTS)
-    left_foot_idx = _find_bvh_index_by_hints(frame0_names, BVH_LEFT_FOOT_HINTS)
-    right_foot_idx = _find_bvh_index_by_hints(frame0_names, BVH_RIGHT_FOOT_HINTS)
+    # Build BVH name -> index using exact names
+    left_hand_idx = _find_bvh_index_by_name(frame0_names, BVH_LEFT_HAND_NAME)
+    right_hand_idx = _find_bvh_index_by_name(frame0_names, BVH_RIGHT_HAND_NAME)
+    left_foot_idx = _find_bvh_index_by_name(frame0_names, BVH_LEFT_FOOT_NAME)
+    right_foot_idx = _find_bvh_index_by_name(frame0_names, BVH_RIGHT_FOOT_NAME)
+    pelvis_idx = _find_bvh_index_by_name(frame0_names, BVH_PELVIS_NAME)
+    left_shoulder_idx = _find_bvh_index_by_name(frame0_names, BVH_LEFT_SHOULDER_NAME)
+    right_shoulder_idx = _find_bvh_index_by_name(frame0_names, BVH_RIGHT_SHOULDER_NAME)
+
+
 
     # IK viewer loop
     with mujoco.viewer.launch_passive(model=model, data=data, show_left_ui=True, show_right_ui=True) as viewer:
@@ -681,6 +720,8 @@ def main() -> None:
         torso_orientation_task.set_target_from_configuration(configuration)
         left_foot_orientation_task.set_target_from_configuration(configuration)
         right_foot_orientation_task.set_target_from_configuration(configuration)
+        left_shoulder_task.set_target_from_configuration(configuration)
+        right_shoulder_task.set_target_from_configuration(configuration)
 
         rate = RateLimiter(frequency=float(FPS), warn=False)
         start_time = time.perf_counter()
@@ -723,24 +764,27 @@ def main() -> None:
                 torso_orientation_task.set_target_from_configuration(configuration)
                 left_foot_orientation_task.set_target_from_configuration(configuration)
                 right_foot_orientation_task.set_target_from_configuration(configuration)
+                left_shoulder_task.set_target_from_configuration(configuration)
+                right_shoulder_task.set_target_from_configuration(configuration)
                 # Reset mocap to frame 0 world poses (if mocap bodies exist)
                 f0_pts_us, f0_rots_us, _, _ = compute_bvh_frame_world_poses(bvh_root, bvh_motion, 0)
                 f0_pts_us = (ROT_BVH_TO_G1 @ f0_pts_us.T).T
                 # Map rotations BVH->G1 using change of basis
                 f0_rots_g1 = ROT_BVH_TO_G1 @ f0_rots_us @ ROT_BVH_TO_G1.T
                 f0_world = f0_pts_us * float(live_scale) + anchor_offset
-                if right_palm_mid != -1:
-                    data.mocap_pos[right_palm_mid][0:3] = f0_world[right_hand_idx]
-                if left_palm_mid != -1:
-                    data.mocap_pos[left_palm_mid][0:3] = f0_world[left_hand_idx]
-                if left_foot_mid != -1:
-                    data.mocap_pos[left_foot_mid][0:3] = f0_world[left_foot_idx]
-                    q = _rotmat_to_quat_wxyz(f0_rots_g1[left_foot_idx])
-                    data.mocap_quat[left_foot_mid][0:4] = q
-                if right_foot_mid != -1:
-                    data.mocap_pos[right_foot_mid][0:3] = f0_world[right_foot_idx]
-                    q = _rotmat_to_quat_wxyz(f0_rots_g1[right_foot_idx])
-                    data.mocap_quat[right_foot_mid][0:4] = q
+                # Reset mocap to frame 0 (required bodies)
+                data.mocap_pos[right_palm_mid][0:3] = f0_world[right_hand_idx]
+                data.mocap_pos[left_palm_mid][0:3] = f0_world[left_hand_idx]
+                data.mocap_pos[left_foot_mid][0:3] = f0_world[left_foot_idx]
+                data.mocap_quat[left_foot_mid][0:4] = _rotmat_to_quat_wxyz(f0_rots_g1[left_foot_idx])
+                data.mocap_pos[right_foot_mid][0:3] = f0_world[right_foot_idx]
+                data.mocap_quat[right_foot_mid][0:4] = _rotmat_to_quat_wxyz(f0_rots_g1[right_foot_idx])
+                data.mocap_pos[pelvis_mid][0:3] = f0_world[pelvis_idx]
+                data.mocap_quat[pelvis_mid][0:4] = _rotmat_to_quat_wxyz(f0_rots_g1[pelvis_idx])
+                data.mocap_pos[left_shoulder_mid][0:3] = f0_world[left_shoulder_idx]
+                data.mocap_quat[left_shoulder_mid][0:4] = _rotmat_to_quat_wxyz(f0_rots_g1[left_shoulder_idx])
+                data.mocap_pos[right_shoulder_mid][0:3] = f0_world[right_shoulder_idx]
+                data.mocap_quat[right_shoulder_mid][0:4] = _rotmat_to_quat_wxyz(f0_rots_g1[right_shoulder_idx])
 
             # Compute BVH world poses for current frame after any reset
             frame_pts_us, frame_rots_us, _, _ = compute_bvh_frame_world_poses(bvh_root, bvh_motion, f)
@@ -752,37 +796,29 @@ def main() -> None:
             # Draw BVH overlay in viewer
             _draw_bvh_overlay(viewer.user_scn, bvh_world, bvh_edges, np.array([0.2, 0.6, 1.0, 1.0], dtype=np.float32))
 
-            # Drive mocap targets if present
-            if right_palm_mid != -1:
-                data.mocap_pos[right_palm_mid][0:3] = bvh_world[right_hand_idx]
-            if left_palm_mid != -1:
-                data.mocap_pos[left_palm_mid][0:3] = bvh_world[left_hand_idx]
-            if left_foot_mid != -1:
-                data.mocap_pos[left_foot_mid][0:3] = bvh_world[left_foot_idx]
-                q = _rotmat_to_quat_wxyz(frame_rots_g1[left_foot_idx])
-                data.mocap_quat[left_foot_mid][0:4] = q
-            if right_foot_mid != -1:
-                data.mocap_pos[right_foot_mid][0:3] = bvh_world[right_foot_idx]
-                q = _rotmat_to_quat_wxyz(frame_rots_g1[right_foot_idx])
-                data.mocap_quat[right_foot_mid][0:4] = q
+            # Drive mocap targets (all required and asserted present)
+            data.mocap_pos[right_palm_mid][0:3] = bvh_world[right_hand_idx]
+            data.mocap_pos[left_palm_mid][0:3] = bvh_world[left_hand_idx]
+            data.mocap_pos[left_foot_mid][0:3] = bvh_world[left_foot_idx]
+            data.mocap_quat[left_foot_mid][0:4] = _rotmat_to_quat_wxyz(frame_rots_g1[left_foot_idx])
+            data.mocap_pos[right_foot_mid][0:3] = bvh_world[right_foot_idx]
+            data.mocap_quat[right_foot_mid][0:4] = _rotmat_to_quat_wxyz(frame_rots_g1[right_foot_idx])
+            data.mocap_pos[pelvis_mid][0:3] = bvh_world[pelvis_idx]
+            data.mocap_quat[pelvis_mid][0:4] = _rotmat_to_quat_wxyz(frame_rots_g1[pelvis_idx])
+            data.mocap_pos[left_shoulder_mid][0:3] = bvh_world[left_shoulder_idx]
+            data.mocap_quat[left_shoulder_mid][0:4] = _rotmat_to_quat_wxyz(frame_rots_g1[left_shoulder_idx])
+            data.mocap_pos[right_shoulder_mid][0:3] = bvh_world[right_shoulder_idx]
+            data.mocap_quat[right_shoulder_mid][0:4] = _rotmat_to_quat_wxyz(frame_rots_g1[right_shoulder_idx])
 
-            # Update task targets from mocap (or hold steady if mocap missing)
-            if right_palm_mid != -1:
-                right_hand_task.set_target(mink.SE3.from_mocap_id(data, right_palm_mid))
-            else:
-                right_hand_task.set_target_from_configuration(configuration)
-            if left_palm_mid != -1:
-                left_hand_task.set_target(mink.SE3.from_mocap_id(data, left_palm_mid))
-            else:
-                left_hand_task.set_target_from_configuration(configuration)
-            if left_foot_mid != -1:
-                left_foot_task.set_target(mink.SE3.from_mocap_id(data, left_foot_mid))
-            else:
-                left_foot_task.set_target_from_configuration(configuration)
-            if right_foot_mid != -1:
-                right_foot_task.set_target(mink.SE3.from_mocap_id(data, right_foot_mid))
-            else:
-                right_foot_task.set_target_from_configuration(configuration)
+            # Update task targets from required mocap bodies
+            right_hand_task.set_target(mink.SE3.from_mocap_id(data, right_palm_mid))
+            left_hand_task.set_target(mink.SE3.from_mocap_id(data, left_palm_mid))
+            left_foot_task.set_target(mink.SE3.from_mocap_id(data, left_foot_mid))
+            right_foot_task.set_target(mink.SE3.from_mocap_id(data, right_foot_mid))
+            left_shoulder_task.set_target(mink.SE3.from_mocap_id(data, left_shoulder_mid))
+            right_shoulder_task.set_target(mink.SE3.from_mocap_id(data, right_shoulder_mid))
+            pelvis_orientation_task.set_target(mink.SE3.from_mocap_id(data, pelvis_mid))
+            pelvis_position_task.set_target(mink.SE3.from_mocap_id(data, pelvis_mid))
 
             # Solve IK step and integrate
             vel = mink.solve_ik(configuration, tasks, rate.dt, SOLVER, 1e-1, limits=limits)
