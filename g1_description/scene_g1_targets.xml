@@ -49,6 +49,26 @@
       <geom type="box" size=".03 .03 .03" contype="0" conaffinity="0" rgba="0.2 0.6 0.6 0.25"/>
       <site type="sphere" size="0.008" rgba="0 1 1 1" group="1"/>
     </body>
+
+    <!-- Elbow targets (mocap) -->
+    <body name="left_elbow_target" pos="0.25 0.3 1.05" quat="1 0 0 0" mocap="true">
+      <geom type="box" size=".028 .028 .028" contype="0" conaffinity="0" rgba="0.6 0.4 0.2 0.25"/>
+      <site type="sphere" size="0.008" rgba="1 0.5 0 1" group="1"/>
+    </body>
+    <body name="right_elbow_target" pos="0.25 -0.3 1.05" quat="1 0 0 0" mocap="true">
+      <geom type="box" size=".028 .028 .028" contype="0" conaffinity="0" rgba="0.2 0.4 0.6 0.25"/>
+      <site type="sphere" size="0.008" rgba="0 0.5 1 1" group="1"/>
+    </body>
+
+    <!-- Knee targets (mocap) -->
+    <body name="left_knee_target" pos="0.05 0.1 0.55" quat="1 0 0 0" mocap="true">
+      <geom type="box" size=".03 .03 .02" contype="0" conaffinity="0" rgba="0.6 0.3 0.3 0.25"/>
+      <site type="sphere" size="0.008" rgba="1 0.3 0.3 1" group="1"/>
+    </body>
+    <body name="right_knee_target" pos="0.05 -0.1 0.55" quat="1 0 0 0" mocap="true">
+      <geom type="box" size=".03 .03 .02" contype="0" conaffinity="0" rgba="0.3 0.3 0.6 0.25"/>
+      <site type="sphere" size="0.008" rgba="0.3 0.3 1 1" group="1"/>
+    </body>
   </worldbody>
 </mujoco>
 

@@ -25,6 +25,7 @@ XML_PATH = os.path.join(BASE_DIR, "g1_description", "scene_g1_targets.xml")
 # Mink/IK
 SOLVER = "daqp"
 FPS = 200.0
+START_AT_FRAME: int = 800  # Initial BVH frame index to start playback from
 
 # BVH -> G1 axis map (BVH: X right, Y up, Z fwd) to (G1: X fwd, Y left, Z up)
 # Columns are BVH basis expressed in G1: [r_x | r_y | r_z]
@@ -55,6 +56,12 @@ BVH_RIGHT_FOOT_NAME = "right_ankle"
 BVH_PELVIS_NAME = "pelvis"
 BVH_LEFT_SHOULDER_NAME = "left_shoulder"
 BVH_RIGHT_SHOULDER_NAME = "right_shoulder"
+
+# New BVH joint names for elbows and knees
+BVH_LEFT_ELBOW_NAME = "left_elbow"
+BVH_RIGHT_ELBOW_NAME = "right_elbow"
+BVH_LEFT_KNEE_NAME = "left_knee"
+BVH_RIGHT_KNEE_NAME = "right_knee"
 
 
 # ----------------------------- Minimal BVH utilities -----------------------------
@@ -508,6 +515,37 @@ def main() -> None:
     )
     tasks.extend([left_shoulder_task, right_shoulder_task])
 
+    # Elbow and knee tracking tasks (body frames)
+    left_elbow_task = mink.FrameTask(
+        frame_name="left_elbow_link",
+        frame_type="body",
+        position_cost=8.0,
+        orientation_cost=2.0,
+        lm_damping=1.0,
+    )
+    right_elbow_task = mink.FrameTask(
+        frame_name="right_elbow_link",
+        frame_type="body",
+        position_cost=8.0,
+        orientation_cost=2.0,
+        lm_damping=1.0,
+    )
+    left_knee_task = mink.FrameTask(
+        frame_name="left_knee_link",
+        frame_type="body",
+        position_cost=8.0,
+        orientation_cost=2.0,
+        lm_damping=1.0,
+    )
+    right_knee_task = mink.FrameTask(
+        frame_name="right_knee_link",
+        frame_type="body",
+        position_cost=8.0,
+        orientation_cost=2.0,
+        lm_damping=1.0,
+    )
+    tasks.extend([left_elbow_task, right_elbow_task, left_knee_task, right_knee_task])
+
     HAND_POSITION_COST = 25.0
     FOOT_POSITION_COST = 30.0
     right_hand_task = mink.FrameTask(
@@ -569,6 +607,10 @@ def main() -> None:
     pelvis_mid = _resolve_required_mocap_id(model, "pelvis_target")
     left_shoulder_mid = _resolve_required_mocap_id(model, "left_shoulder_target")
     right_shoulder_mid = _resolve_required_mocap_id(model, "right_shoulder_target")
+    left_elbow_mid = _resolve_required_mocap_id(model, "left_elbow_target")
+    right_elbow_mid = _resolve_required_mocap_id(model, "right_elbow_target")
+    left_knee_mid = _resolve_required_mocap_id(model, "left_knee_target")
+    right_knee_mid = _resolve_required_mocap_id(model, "right_knee_target")
 
     # All targets are required; fail fast if any are missing
     assert min(
@@ -579,6 +621,10 @@ def main() -> None:
         pelvis_mid,
         left_shoulder_mid,
         right_shoulder_mid,
+        left_elbow_mid,
+        right_elbow_mid,
+        left_knee_mid,
+        right_knee_mid,
     ) >= 0, "Required mocap targets not found in model"
 
     # Initial base alignment to ground
@@ -630,32 +676,88 @@ def main() -> None:
                 raise RuntimeError("Invalid wingspan(s); cannot scale.")
             scale_used = float(wingspan_g1 / wingspan_bvh)
 
-    # Live scale UI using ttk.Scale (no Entry widgets to avoid XCB issues)
-    class _ScaleUI:
-        def __init__(self, initial_value: float, min_value: float, max_value: float) -> None:
+    # Live control UI using ttk widgets (no Entry widgets to avoid XCB issues)
+    class _ControlUI:
+        def __init__(self, initial_value: float, min_value: float, max_value: float, total_frames: int) -> None:
             self._value = float(initial_value)
             self._lock = threading.Lock()
             self._ready = threading.Event()
             self._min = float(min_value)
             self._max = float(max_value)
+            self._paused = False
+            self._reset_event = threading.Event()
+            self._total_frames = int(total_frames)
+            self._frame_idx_shared = 0
+            self._root = None
+            self._frame_label_var = None
 
         def start(self) -> None:
             def _run() -> None:
                 import tkinter as tk
                 from tkinter import ttk
                 root = tk.Tk()
-                root.title("BVH Scale")
+                root.title("BVH Controls")
+                try:
+                    root.geometry("520x220")
+                except Exception:
+                    pass
+                # Frame display
+                self._frame_label_var = tk.StringVar(value=f"Frame: 0 / {max(0, self._total_frames - 1)}")
+                frame_label = ttk.Label(root, textvariable=self._frame_label_var, anchor="w")
+                frame_label.pack(fill="x", padx=8, pady=(0, 6))
+
+                def _tick_update_frame_label() -> None:
+                    with self._lock:
+                        idx = int(self._frame_idx_shared)
+                        total_minus_1 = max(0, self._total_frames - 1)
+                        text = f"Frame: {idx} / {total_minus_1}"
+                    try:
+                        self._frame_label_var.set(text)
+                    except Exception:
+                        pass
+                    try:
+                        root.after(100, _tick_update_frame_label)
+                    except Exception:
+                        pass
+
+
+                # Scale controls
                 var = tk.DoubleVar(value=float(self._value))
                 label = ttk.Label(root, text=f"Scale: {float(var.get()):.3f}", anchor="e")
                 label.pack(fill="x", padx=8, pady=6)
+
                 def _on_change(*_args: object) -> None:
                     val = float(var.get())
                     with self._lock:
                         self._value = val
                     label.configure(text=f"Scale: {val:.3f}")
+
                 var.trace_add("write", _on_change)
                 scale = ttk.Scale(root, from_=self._min, to=self._max, orient="horizontal", variable=var)
                 scale.pack(fill="x", padx=8, pady=6)
+
+                # Playback controls
+                controls = ttk.Frame(root)
+                controls.pack(fill="x", padx=8, pady=6)
+
+                btn_text = tk.StringVar(value="Pause")
+
+                def _toggle_play_pause() -> None:
+                    with self._lock:
+                        self._paused = not self._paused
+                        btn_text.set("Play" if self._paused else "Pause")
+
+                def _request_reset() -> None:
+                    self._reset_event.set()
+
+                play_pause_btn = ttk.Button(controls, textvariable=btn_text, command=_toggle_play_pause)
+                play_pause_btn.pack(side="left", expand=True, fill="x", padx=(0, 4))
+                reset_btn = ttk.Button(controls, text="Reset", command=_request_reset)
+                reset_btn.pack(side="left", expand=True, fill="x", padx=(4, 0))
+
+                # Start periodic UI updates
+                _tick_update_frame_label()
+
                 self._ready.set()
                 root.mainloop()
             t = threading.Thread(target=_run, daemon=True)
@@ -666,12 +768,26 @@ def main() -> None:
             with self._lock:
                 return float(self._value)
 
+        def is_paused(self) -> bool:
+            with self._lock:
+                return bool(self._paused)
+
+        def consume_reset(self) -> bool:
+            if self._reset_event.is_set():
+                self._reset_event.clear()
+                return True
+            return False
+
+        def set_frame_index(self, idx: int) -> None:
+            with self._lock:
+                self._frame_idx_shared = int(max(0, idx))
+
     # Base scale from computed scale or manual override; slider controls absolute value
     base_scale = float(BVH_SCALE) if BVH_SCALE is not None else (float(scale_used) if scale_used is not None else 1.0)
     # Slider range: narrow +/- 0.002 around base scale (e.g., default ~0.008)
     min_scale = max(1e-4, base_scale - 0.002)
     max_scale = base_scale + 0.002
-    ui = _ScaleUI(initial_value=base_scale, min_value=min_scale, max_value=max_scale)
+    ui = _ControlUI(initial_value=base_scale, min_value=min_scale, max_value=max_scale, total_frames=num_frames)
     ui.start()
 
     # Compute initial anchor targets based on frame 0 and pelvis position
@@ -696,6 +812,10 @@ def main() -> None:
     pelvis_idx = _find_bvh_index_by_name(frame0_names, BVH_PELVIS_NAME)
     left_shoulder_idx = _find_bvh_index_by_name(frame0_names, BVH_LEFT_SHOULDER_NAME)
     right_shoulder_idx = _find_bvh_index_by_name(frame0_names, BVH_RIGHT_SHOULDER_NAME)
+    left_elbow_idx = _find_bvh_index_by_name(frame0_names, BVH_LEFT_ELBOW_NAME)
+    right_elbow_idx = _find_bvh_index_by_name(frame0_names, BVH_RIGHT_ELBOW_NAME)
+    left_knee_idx = _find_bvh_index_by_name(frame0_names, BVH_LEFT_KNEE_NAME)
+    right_knee_idx = _find_bvh_index_by_name(frame0_names, BVH_RIGHT_KNEE_NAME)
 
 
 
@@ -722,9 +842,61 @@ def main() -> None:
         right_foot_orientation_task.set_target_from_configuration(configuration)
         left_shoulder_task.set_target_from_configuration(configuration)
         right_shoulder_task.set_target_from_configuration(configuration)
+        left_elbow_task.set_target_from_configuration(configuration)
+        right_elbow_task.set_target_from_configuration(configuration)
+        left_knee_task.set_target_from_configuration(configuration)
+        right_knee_task.set_target_from_configuration(configuration)
 
         rate = RateLimiter(frequency=float(FPS), warn=False)
-        start_time = time.perf_counter()
+        # Initialize playback time from START_AT_FRAME
+        start_frame_clamped = int(min(max(0, START_AT_FRAME), max(0, num_frames - 1)))
+        anim_t = float(start_frame_clamped) * float(frame_time)
+
+        def _reinit_to_frame0(live_scale: float) -> None:
+            nonlocal anim_t, anchor_offset
+            # Restart animation time and re-anchor using frame 0 and current pelvis XY
+            anim_t = 0.0
+            pelvis_xy_now = np.array(data.xpos[pelvis_bid][0:2], dtype=np.float64) if pelvis_bid >= 0 else np.zeros(2)
+            anchor_offset = _compute_anchor_for_targets(live_scale, frame0_pts_unscaled, pelvis_xy_now, 0.0)
+            # Reinitialize IK task targets
+            mujoco.mj_forward(configuration.model, configuration.data)
+            posture_task.set_target_from_configuration(configuration)
+            pelvis_orientation_task.set_target_from_configuration(configuration)
+            pelvis_position_task.set_target_from_configuration(configuration)
+            torso_orientation_task.set_target_from_configuration(configuration)
+            left_foot_orientation_task.set_target_from_configuration(configuration)
+            right_foot_orientation_task.set_target_from_configuration(configuration)
+            left_shoulder_task.set_target_from_configuration(configuration)
+            right_shoulder_task.set_target_from_configuration(configuration)
+            left_elbow_task.set_target_from_configuration(configuration)
+            right_elbow_task.set_target_from_configuration(configuration)
+            left_knee_task.set_target_from_configuration(configuration)
+            right_knee_task.set_target_from_configuration(configuration)
+            # Reset mocap to frame 0 world poses
+            f0_pts_us, f0_rots_us, _, _ = compute_bvh_frame_world_poses(bvh_root, bvh_motion, 0)
+            f0_pts_us = (ROT_BVH_TO_G1 @ f0_pts_us.T).T
+            f0_rots_g1 = ROT_BVH_TO_G1 @ f0_rots_us @ ROT_BVH_TO_G1.T
+            f0_world = f0_pts_us * float(live_scale) + anchor_offset
+            data.mocap_pos[right_palm_mid][0:3] = f0_world[right_hand_idx]
+            data.mocap_pos[left_palm_mid][0:3] = f0_world[left_hand_idx]
+            data.mocap_pos[left_foot_mid][0:3] = f0_world[left_foot_idx]
+            data.mocap_quat[left_foot_mid][0:4] = _rotmat_to_quat_wxyz(f0_rots_g1[left_foot_idx])
+            data.mocap_pos[right_foot_mid][0:3] = f0_world[right_foot_idx]
+            data.mocap_quat[right_foot_mid][0:4] = _rotmat_to_quat_wxyz(f0_rots_g1[right_foot_idx])
+            data.mocap_pos[pelvis_mid][0:3] = f0_world[pelvis_idx]
+            data.mocap_quat[pelvis_mid][0:4] = _rotmat_to_quat_wxyz(f0_rots_g1[pelvis_idx])
+            data.mocap_pos[left_shoulder_mid][0:3] = f0_world[left_shoulder_idx]
+            data.mocap_quat[left_shoulder_mid][0:4] = _rotmat_to_quat_wxyz(f0_rots_g1[left_shoulder_idx])
+            data.mocap_pos[right_shoulder_mid][0:3] = f0_world[right_shoulder_idx]
+            data.mocap_quat[right_shoulder_mid][0:4] = _rotmat_to_quat_wxyz(f0_rots_g1[right_shoulder_idx])
+            data.mocap_pos[left_elbow_mid][0:3] = f0_world[left_elbow_idx]
+            data.mocap_quat[left_elbow_mid][0:4] = _rotmat_to_quat_wxyz(f0_rots_g1[left_elbow_idx])
+            data.mocap_pos[right_elbow_mid][0:3] = f0_world[right_elbow_idx]
+            data.mocap_quat[right_elbow_mid][0:4] = _rotmat_to_quat_wxyz(f0_rots_g1[right_elbow_idx])
+            data.mocap_pos[left_knee_mid][0:3] = f0_world[left_knee_idx]
+            data.mocap_quat[left_knee_mid][0:4] = _rotmat_to_quat_wxyz(f0_rots_g1[left_knee_idx])
+            data.mocap_pos[right_knee_mid][0:3] = f0_world[right_knee_idx]
+            data.mocap_quat[right_knee_mid][0:4] = _rotmat_to_quat_wxyz(f0_rots_g1[right_knee_idx])
 
         def _draw_bvh_overlay(scene: mujoco.MJVSCENE, pts: np.ndarray, edges: List[Tuple[int, int]], rgba: np.ndarray) -> None:
             scene.ngeom = 0
@@ -742,49 +914,19 @@ def main() -> None:
                 scene.ngeom += 1
 
         while viewer.is_running():
-            elapsed = time.perf_counter() - start_time
-            f = int((elapsed / frame_time) % max(1, num_frames))
-
-            # Live scale from UI; if changed, reset: restart time, recompute anchor from frame 0 and current pelvis XY,
-            # and reinitialize task and mocap targets based on frame 0.
+            # Live controls: scale change, pause, and reset
             live_scale = float(ui.get())
             if abs(live_scale - prev_scale) > 1e-6:
-                # Restart animation from frame 0
-                start_time = time.perf_counter()
-                f = 0
-                # Re-anchor using frame 0 and current pelvis XY, ground z=0
-                pelvis_xy_now = np.array(data.xpos[pelvis_bid][0:2], dtype=np.float64) if pelvis_bid >= 0 else np.zeros(2)
-                anchor_offset = _compute_anchor_for_targets(live_scale, frame0_pts_unscaled, pelvis_xy_now, 0.0)
+                _reinit_to_frame0(live_scale)
                 prev_scale = float(live_scale)
-                # Reinitialize IK task targets
-                mujoco.mj_forward(configuration.model, configuration.data)
-                posture_task.set_target_from_configuration(configuration)
-                pelvis_orientation_task.set_target_from_configuration(configuration)
-                pelvis_position_task.set_target_from_configuration(configuration)
-                torso_orientation_task.set_target_from_configuration(configuration)
-                left_foot_orientation_task.set_target_from_configuration(configuration)
-                right_foot_orientation_task.set_target_from_configuration(configuration)
-                left_shoulder_task.set_target_from_configuration(configuration)
-                right_shoulder_task.set_target_from_configuration(configuration)
-                # Reset mocap to frame 0 world poses (if mocap bodies exist)
-                f0_pts_us, f0_rots_us, _, _ = compute_bvh_frame_world_poses(bvh_root, bvh_motion, 0)
-                f0_pts_us = (ROT_BVH_TO_G1 @ f0_pts_us.T).T
-                # Map rotations BVH->G1 using change of basis
-                f0_rots_g1 = ROT_BVH_TO_G1 @ f0_rots_us @ ROT_BVH_TO_G1.T
-                f0_world = f0_pts_us * float(live_scale) + anchor_offset
-                # Reset mocap to frame 0 (required bodies)
-                data.mocap_pos[right_palm_mid][0:3] = f0_world[right_hand_idx]
-                data.mocap_pos[left_palm_mid][0:3] = f0_world[left_hand_idx]
-                data.mocap_pos[left_foot_mid][0:3] = f0_world[left_foot_idx]
-                data.mocap_quat[left_foot_mid][0:4] = _rotmat_to_quat_wxyz(f0_rots_g1[left_foot_idx])
-                data.mocap_pos[right_foot_mid][0:3] = f0_world[right_foot_idx]
-                data.mocap_quat[right_foot_mid][0:4] = _rotmat_to_quat_wxyz(f0_rots_g1[right_foot_idx])
-                data.mocap_pos[pelvis_mid][0:3] = f0_world[pelvis_idx]
-                data.mocap_quat[pelvis_mid][0:4] = _rotmat_to_quat_wxyz(f0_rots_g1[pelvis_idx])
-                data.mocap_pos[left_shoulder_mid][0:3] = f0_world[left_shoulder_idx]
-                data.mocap_quat[left_shoulder_mid][0:4] = _rotmat_to_quat_wxyz(f0_rots_g1[left_shoulder_idx])
-                data.mocap_pos[right_shoulder_mid][0:3] = f0_world[right_shoulder_idx]
-                data.mocap_quat[right_shoulder_mid][0:4] = _rotmat_to_quat_wxyz(f0_rots_g1[right_shoulder_idx])
+            if ui.consume_reset():
+                _reinit_to_frame0(prev_scale)
+
+            if not ui.is_paused():
+                anim_t += rate.dt
+
+            f = int((anim_t / frame_time) % max(1, num_frames))
+            ui.set_frame_index(f)
 
             # Compute BVH world poses for current frame after any reset
             frame_pts_us, frame_rots_us, _, _ = compute_bvh_frame_world_poses(bvh_root, bvh_motion, f)
@@ -809,6 +951,14 @@ def main() -> None:
             data.mocap_quat[left_shoulder_mid][0:4] = _rotmat_to_quat_wxyz(frame_rots_g1[left_shoulder_idx])
             data.mocap_pos[right_shoulder_mid][0:3] = bvh_world[right_shoulder_idx]
             data.mocap_quat[right_shoulder_mid][0:4] = _rotmat_to_quat_wxyz(frame_rots_g1[right_shoulder_idx])
+            data.mocap_pos[left_elbow_mid][0:3] = bvh_world[left_elbow_idx]
+            data.mocap_quat[left_elbow_mid][0:4] = _rotmat_to_quat_wxyz(frame_rots_g1[left_elbow_idx])
+            data.mocap_pos[right_elbow_mid][0:3] = bvh_world[right_elbow_idx]
+            data.mocap_quat[right_elbow_mid][0:4] = _rotmat_to_quat_wxyz(frame_rots_g1[right_elbow_idx])
+            data.mocap_pos[left_knee_mid][0:3] = bvh_world[left_knee_idx]
+            data.mocap_quat[left_knee_mid][0:4] = _rotmat_to_quat_wxyz(frame_rots_g1[left_knee_idx])
+            data.mocap_pos[right_knee_mid][0:3] = bvh_world[right_knee_idx]
+            data.mocap_quat[right_knee_mid][0:4] = _rotmat_to_quat_wxyz(frame_rots_g1[right_knee_idx])
 
             # Update task targets from required mocap bodies
             right_hand_task.set_target(mink.SE3.from_mocap_id(data, right_palm_mid))
@@ -817,6 +967,10 @@ def main() -> None:
             right_foot_task.set_target(mink.SE3.from_mocap_id(data, right_foot_mid))
             left_shoulder_task.set_target(mink.SE3.from_mocap_id(data, left_shoulder_mid))
             right_shoulder_task.set_target(mink.SE3.from_mocap_id(data, right_shoulder_mid))
+            left_elbow_task.set_target(mink.SE3.from_mocap_id(data, left_elbow_mid))
+            right_elbow_task.set_target(mink.SE3.from_mocap_id(data, right_elbow_mid))
+            left_knee_task.set_target(mink.SE3.from_mocap_id(data, left_knee_mid))
+            right_knee_task.set_target(mink.SE3.from_mocap_id(data, right_knee_mid))
             pelvis_orientation_task.set_target(mink.SE3.from_mocap_id(data, pelvis_mid))
             pelvis_position_task.set_target(mink.SE3.from_mocap_id(data, pelvis_mid))
 
