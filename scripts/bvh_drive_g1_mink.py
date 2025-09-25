@@ -279,6 +279,107 @@ def compute_bvh_frame_world_positions(root: BVHNode, motion: BVHMotion, frame_id
     return np.vstack(positions), edges, names
 
 
+def compute_bvh_frame_world_poses(
+    root: BVHNode, motion: BVHMotion, frame_idx: int
+) -> Tuple[np.ndarray, np.ndarray, List[Tuple[int, int]], List[str]]:
+    """Compute world-space positions and rotations (3x3) for all BVH nodes.
+
+    Returns (positions Nx3, rotations Nx3x3, edges, names).
+    """
+    values = motion.frames[int(frame_idx)]
+    positions: List[np.ndarray] = []
+    rotations: List[np.ndarray] = []
+    edges: List[Tuple[int, int]] = []
+    names: List[str] = []
+
+    def local_rotation(node: BVHNode) -> np.ndarray:
+        if not node.channels:
+            return np.eye(3, dtype=np.float64)
+        R = np.eye(3, dtype=np.float64)
+        off = node.channel_offset
+        for j, ch in enumerate(node.channels):
+            v = float(values[off + j])
+            if ch.lower().endswith("rotation"):
+                a = math.radians(v)
+                axis = ch[0].upper()
+                if axis == "X":
+                    R = R @ _rot_x(a)
+                elif axis == "Y":
+                    R = R @ _rot_y(a)
+                elif axis == "Z":
+                    R = R @ _rot_z(a)
+        return R
+
+    def root_translation(node: BVHNode) -> np.ndarray:
+        if not node.channels:
+            return np.zeros(3, dtype=np.float64)
+        t = np.zeros(3, dtype=np.float64)
+        off = node.channel_offset
+        for j, ch in enumerate(node.channels):
+            if ch.lower().endswith("position"):
+                axis = ch[0].upper()
+                if axis == "X":
+                    t[0] = float(values[off + j])
+                elif axis == "Y":
+                    t[1] = float(values[off + j])
+                elif axis == "Z":
+                    t[2] = float(values[off + j])
+        return t
+
+    def dfs(node: BVHNode, parent_index: int, parent_pos: np.ndarray, parent_rot: np.ndarray, is_root: bool) -> int:
+        idx = len(positions)
+        R_local = local_rotation(node)
+        R_world = parent_rot @ R_local
+        pos = parent_pos + parent_rot @ node.offset
+        if is_root:
+            pos = pos + root_translation(node)
+        positions.append(pos)
+        rotations.append(R_world)
+        names.append(node.name)
+        if parent_index is not None and parent_index >= 0:
+            edges.append((parent_index, idx))
+        for child in node.children:
+            dfs(child, idx, pos, R_world, False)
+        return idx
+
+    dfs(root, -1, np.zeros(3, dtype=np.float64), np.eye(3, dtype=np.float64), True)
+    return np.vstack(positions), np.stack(rotations, axis=0), edges, names
+
+
+def _rotmat_to_quat_wxyz(R: np.ndarray) -> np.ndarray:
+    """Convert a 3x3 rotation matrix to a unit quaternion in MuJoCo (w, x, y, z)."""
+    m00, m01, m02 = float(R[0, 0]), float(R[0, 1]), float(R[0, 2])
+    m10, m11, m12 = float(R[1, 0]), float(R[1, 1]), float(R[1, 2])
+    m20, m21, m22 = float(R[2, 0]), float(R[2, 1]), float(R[2, 2])
+    trace = m00 + m11 + m22
+    if trace > 0.0:
+        S = math.sqrt(trace + 1.0) * 2.0
+        w = 0.25 * S
+        x = (m21 - m12) / S
+        y = (m02 - m20) / S
+        z = (m10 - m01) / S
+    elif (m00 > m11) and (m00 > m22):
+        S = math.sqrt(1.0 + m00 - m11 - m22) * 2.0
+        w = (m21 - m12) / S
+        x = 0.25 * S
+        y = (m01 + m10) / S
+        z = (m02 + m20) / S
+    elif m11 > m22:
+        S = math.sqrt(1.0 + m11 - m00 - m22) * 2.0
+        w = (m02 - m20) / S
+        x = (m01 + m10) / S
+        y = 0.25 * S
+        z = (m12 + m21) / S
+    else:
+        S = math.sqrt(1.0 + m22 - m00 - m11) * 2.0
+        w = (m10 - m01) / S
+        x = (m02 + m20) / S
+        y = (m12 + m21) / S
+        z = 0.25 * S
+    q = np.array([w, x, y, z], dtype=np.float64)
+    q /= max(1e-12, float(np.linalg.norm(q)))
+    return q
+
 def _estimate_bvh_arm_height(points: np.ndarray, k: int = 3) -> Optional[float]:
     if points.size == 0:
         return None
@@ -407,14 +508,14 @@ def main() -> None:
         frame_name="left_foot",
         frame_type="site",
         position_cost=FOOT_POSITION_COST,
-        orientation_cost=0.0,
+        orientation_cost=2.0,
         lm_damping=1.0,
     )
     right_foot_task = mink.FrameTask(
         frame_name="right_foot",
         frame_type="site",
         position_cost=FOOT_POSITION_COST,
-        orientation_cost=0.0,
+        orientation_cost=2.0,
         lm_damping=1.0,
     )
     tasks.extend([right_hand_task, left_hand_task, left_foot_task, right_foot_task])
@@ -622,9 +723,11 @@ def main() -> None:
                 torso_orientation_task.set_target_from_configuration(configuration)
                 left_foot_orientation_task.set_target_from_configuration(configuration)
                 right_foot_orientation_task.set_target_from_configuration(configuration)
-                # Reset mocap to frame 0 world positions (if mocap bodies exist)
-                f0_pts_us, _, _ = compute_bvh_frame_world_positions(bvh_root, bvh_motion, 0)
+                # Reset mocap to frame 0 world poses (if mocap bodies exist)
+                f0_pts_us, f0_rots_us, _, _ = compute_bvh_frame_world_poses(bvh_root, bvh_motion, 0)
                 f0_pts_us = (ROT_BVH_TO_G1 @ f0_pts_us.T).T
+                # Map rotations BVH->G1 using change of basis
+                f0_rots_g1 = ROT_BVH_TO_G1 @ f0_rots_us @ ROT_BVH_TO_G1.T
                 f0_world = f0_pts_us * float(live_scale) + anchor_offset
                 if right_palm_mid != -1:
                     data.mocap_pos[right_palm_mid][0:3] = f0_world[right_hand_idx]
@@ -632,12 +735,17 @@ def main() -> None:
                     data.mocap_pos[left_palm_mid][0:3] = f0_world[left_hand_idx]
                 if left_foot_mid != -1:
                     data.mocap_pos[left_foot_mid][0:3] = f0_world[left_foot_idx]
+                    q = _rotmat_to_quat_wxyz(f0_rots_g1[left_foot_idx])
+                    data.mocap_quat[left_foot_mid][0:4] = q
                 if right_foot_mid != -1:
                     data.mocap_pos[right_foot_mid][0:3] = f0_world[right_foot_idx]
+                    q = _rotmat_to_quat_wxyz(f0_rots_g1[right_foot_idx])
+                    data.mocap_quat[right_foot_mid][0:4] = q
 
-            # Compute BVH world points for current frame after any reset
-            frame_pts_us, _, _ = compute_bvh_frame_world_positions(bvh_root, bvh_motion, f)
+            # Compute BVH world poses for current frame after any reset
+            frame_pts_us, frame_rots_us, _, _ = compute_bvh_frame_world_poses(bvh_root, bvh_motion, f)
             frame_pts_us = (ROT_BVH_TO_G1 @ frame_pts_us.T).T
+            frame_rots_g1 = ROT_BVH_TO_G1 @ frame_rots_us @ ROT_BVH_TO_G1.T
             frame_pts_scaled = frame_pts_us * float(live_scale)
             bvh_world = frame_pts_scaled + anchor_offset
 
@@ -651,8 +759,12 @@ def main() -> None:
                 data.mocap_pos[left_palm_mid][0:3] = bvh_world[left_hand_idx]
             if left_foot_mid != -1:
                 data.mocap_pos[left_foot_mid][0:3] = bvh_world[left_foot_idx]
+                q = _rotmat_to_quat_wxyz(frame_rots_g1[left_foot_idx])
+                data.mocap_quat[left_foot_mid][0:4] = q
             if right_foot_mid != -1:
                 data.mocap_pos[right_foot_mid][0:3] = bvh_world[right_foot_idx]
+                q = _rotmat_to_quat_wxyz(frame_rots_g1[right_foot_idx])
+                data.mocap_quat[right_foot_mid][0:4] = q
 
             # Update task targets from mocap (or hold steady if mocap missing)
             if right_palm_mid != -1:
