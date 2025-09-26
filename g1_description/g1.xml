@@ -162,6 +162,7 @@
                     diaginertia="0.00167218 0.0016161 0.000217621"/>
                   <joint name="left_ankle_roll_joint" class="ankle_roll"/>
                   <geom class="visual" material="black" mesh="left_ankle_roll_link"/>
+                  <site name="left_ankle" pos="0 0 0"/>
                   <site name="left_foot" pos="0 0 -0.035"/>
                   <geom name="left_foot" class="foot" pos="0.04 0 -0.029" size="0.09 0.03 0.008" type="box"/>
                 </body>
@@ -203,6 +204,7 @@
                     diaginertia="0.00167218 0.0016161 0.000217621"/>
                   <joint name="right_ankle_roll_joint" class="ankle_roll"/>
                   <geom class="visual" material="black" mesh="right_ankle_roll_link"/>
+                  <site name="right_ankle" pos="0 0 0"/>
                   <site name="right_foot" pos="0 0 -0.035"/>
                   <geom name="right_foot" class="foot" pos="0.04 0 -0.029" size="0.09 0.03 0.008" type="box"/>
                 </body>

@@ -48,6 +48,10 @@ WINGSPAN_SCALE = False
 # Viewer overlay
 LINE_RADIUS = 0.006
 
+# IK safety clamps
+FLOOR_Z = 0.0
+CLAMP_HANDS_AND_FEET_TO_FLOOR = True
+
 # BVH node names (exact, case-insensitive). Static per provided BVH.
 BVH_LEFT_HAND_NAME = "left_wrist"
 BVH_RIGHT_HAND_NAME = "right_wrist"
@@ -425,6 +429,14 @@ def _resolve_required_mocap_id(model: mujoco.MjModel, body_name: str) -> int:
     return mid
 
 
+def _clamp_floor_z(p: np.ndarray, floor_z: float) -> np.ndarray:
+    """Return a copy of p with z clamped to at least floor_z."""
+    v = np.asarray(p, dtype=np.float64).copy()
+    if v.shape[0] >= 3 and float(v[2]) < float(floor_z):
+        v[2] = float(floor_z)
+    return v
+
+
 def _shift_base_z_to_ground(model: mujoco.MjModel, data: mujoco.MjData, left_site: str, right_site: str) -> None:
     try:
         free_qpos_addr = None
@@ -563,14 +575,14 @@ def main() -> None:
         lm_damping=1.0,
     )
     left_foot_task = mink.FrameTask(
-        frame_name="left_foot",
+        frame_name="left_ankle",
         frame_type="site",
         position_cost=FOOT_POSITION_COST,
         orientation_cost=2.0,
         lm_damping=1.0,
     )
     right_foot_task = mink.FrameTask(
-        frame_name="right_foot",
+        frame_name="right_ankle",
         frame_type="site",
         position_cost=FOOT_POSITION_COST,
         orientation_cost=2.0,
@@ -877,11 +889,18 @@ def main() -> None:
             f0_pts_us = (ROT_BVH_TO_G1 @ f0_pts_us.T).T
             f0_rots_g1 = ROT_BVH_TO_G1 @ f0_rots_us @ ROT_BVH_TO_G1.T
             f0_world = f0_pts_us * float(live_scale) + anchor_offset
-            data.mocap_pos[right_palm_mid][0:3] = f0_world[right_hand_idx]
-            data.mocap_pos[left_palm_mid][0:3] = f0_world[left_hand_idx]
-            data.mocap_pos[left_foot_mid][0:3] = f0_world[left_foot_idx]
+            # Clamp hands/feet to floor if enabled
+            if CLAMP_HANDS_AND_FEET_TO_FLOOR:
+                data.mocap_pos[right_palm_mid][0:3] = _clamp_floor_z(f0_world[right_hand_idx], FLOOR_Z)
+                data.mocap_pos[left_palm_mid][0:3] = _clamp_floor_z(f0_world[left_hand_idx], FLOOR_Z)
+                data.mocap_pos[left_foot_mid][0:3] = _clamp_floor_z(f0_world[left_foot_idx], FLOOR_Z)
+                data.mocap_pos[right_foot_mid][0:3] = _clamp_floor_z(f0_world[right_foot_idx], FLOOR_Z)
+            else:
+                data.mocap_pos[right_palm_mid][0:3] = f0_world[right_hand_idx]
+                data.mocap_pos[left_palm_mid][0:3] = f0_world[left_hand_idx]
+                data.mocap_pos[left_foot_mid][0:3] = f0_world[left_foot_idx]
+                data.mocap_pos[right_foot_mid][0:3] = f0_world[right_foot_idx]
             data.mocap_quat[left_foot_mid][0:4] = _rotmat_to_quat_wxyz(f0_rots_g1[left_foot_idx])
-            data.mocap_pos[right_foot_mid][0:3] = f0_world[right_foot_idx]
             data.mocap_quat[right_foot_mid][0:4] = _rotmat_to_quat_wxyz(f0_rots_g1[right_foot_idx])
             data.mocap_pos[pelvis_mid][0:3] = f0_world[pelvis_idx]
             data.mocap_quat[pelvis_mid][0:4] = _rotmat_to_quat_wxyz(f0_rots_g1[pelvis_idx])
@@ -939,11 +958,17 @@ def main() -> None:
             _draw_bvh_overlay(viewer.user_scn, bvh_world, bvh_edges, np.array([0.2, 0.6, 1.0, 1.0], dtype=np.float32))
 
             # Drive mocap targets (all required and asserted present)
-            data.mocap_pos[right_palm_mid][0:3] = bvh_world[right_hand_idx]
-            data.mocap_pos[left_palm_mid][0:3] = bvh_world[left_hand_idx]
-            data.mocap_pos[left_foot_mid][0:3] = bvh_world[left_foot_idx]
+            if CLAMP_HANDS_AND_FEET_TO_FLOOR:
+                data.mocap_pos[right_palm_mid][0:3] = _clamp_floor_z(bvh_world[right_hand_idx], FLOOR_Z)
+                data.mocap_pos[left_palm_mid][0:3] = _clamp_floor_z(bvh_world[left_hand_idx], FLOOR_Z)
+                data.mocap_pos[left_foot_mid][0:3] = _clamp_floor_z(bvh_world[left_foot_idx], FLOOR_Z)
+                data.mocap_pos[right_foot_mid][0:3] = _clamp_floor_z(bvh_world[right_foot_idx], FLOOR_Z)
+            else:
+                data.mocap_pos[right_palm_mid][0:3] = bvh_world[right_hand_idx]
+                data.mocap_pos[left_palm_mid][0:3] = bvh_world[left_hand_idx]
+                data.mocap_pos[left_foot_mid][0:3] = bvh_world[left_foot_idx]
+                data.mocap_pos[right_foot_mid][0:3] = bvh_world[right_foot_idx]
             data.mocap_quat[left_foot_mid][0:4] = _rotmat_to_quat_wxyz(frame_rots_g1[left_foot_idx])
-            data.mocap_pos[right_foot_mid][0:3] = bvh_world[right_foot_idx]
             data.mocap_quat[right_foot_mid][0:4] = _rotmat_to_quat_wxyz(frame_rots_g1[right_foot_idx])
             data.mocap_pos[pelvis_mid][0:3] = bvh_world[pelvis_idx]
             data.mocap_quat[pelvis_mid][0:4] = _rotmat_to_quat_wxyz(frame_rots_g1[pelvis_idx])
