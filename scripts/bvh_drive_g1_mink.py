@@ -14,6 +14,10 @@ from loop_rate_limiters import RateLimiter
 
 import mink
 import threading
+import json
+from datetime import datetime
+import shutil
+import subprocess
 
 
 # ----------------------------- Static configuration -----------------------------
@@ -25,7 +29,7 @@ XML_PATH = os.path.join(BASE_DIR, "g1_description", "scene_g1_targets.xml")
 # Mink/IK
 SOLVER = "daqp"
 FPS = 200.0
-START_AT_FRAME: int = 800  # Initial BVH frame index to start playback from
+START_AT_FRAME: int = 0  # Initial BVH frame index to start playback from
 
 # BVH -> G1 axis map (BVH: X right, Y up, Z fwd) to (G1: X fwd, Y left, Z up)
 # Columns are BVH basis expressed in G1: [r_x | r_y | r_z]
@@ -41,7 +45,7 @@ ROT_BVH_TO_G1 = np.array(
 # Scaling options
 # Default to a fixed manual scale; disable auto-scaling heuristics.
 AUTO_SCALE = False
-BVH_SCALE: Optional[float] = 0.01  # Initial default scale
+BVH_SCALE: Optional[float] = 0.009  # Initial default scale
 SHOULDER_SCALE = False
 WINGSPAN_SCALE = False
 
@@ -51,6 +55,7 @@ LINE_RADIUS = 0.006
 # IK safety clamps
 FLOOR_Z = 0.0
 CLAMP_HANDS_AND_FEET_TO_FLOOR = True
+
 
 # BVH node names (exact, case-insensitive). Static per provided BVH.
 BVH_LEFT_HAND_NAME = "left_wrist"
@@ -532,14 +537,14 @@ def main() -> None:
         frame_name="left_elbow_link",
         frame_type="body",
         position_cost=8.0,
-        orientation_cost=2.0,
+        orientation_cost=0.0,
         lm_damping=1.0,
     )
     right_elbow_task = mink.FrameTask(
         frame_name="right_elbow_link",
         frame_type="body",
         position_cost=8.0,
-        orientation_cost=2.0,
+        orientation_cost=0.0,
         lm_damping=1.0,
     )
     left_knee_task = mink.FrameTask(
@@ -607,7 +612,18 @@ def main() -> None:
     )
     tasks.extend([left_foot_orientation_task, right_foot_orientation_task])
 
-    limits = [mink.ConfigurationLimit(model)]
+    # Collision avoidance using fromto sensors (arms vs legs)
+    # Geom names defined in g1_description/g1.xml
+    collision_pairs = [
+        (["left_forearm", "right_forearm"], ["left_thigh", "right_thigh", "left_shin", "right_shin"]),
+    ]
+    collision_avoidance_limit = mink.CollisionAvoidanceLimit(
+        model=model,
+        geom_pairs=collision_pairs,  # type: ignore[arg-type]
+        minimum_distance_from_collisions=0.05,
+        collision_detection_distance=0.12,
+    )
+    limits = [mink.ConfigurationLimit(model), collision_avoidance_limit]
 
     mujoco.mj_forward(configuration.model, configuration.data)
 
@@ -702,6 +718,9 @@ def main() -> None:
             self._frame_idx_shared = 0
             self._root = None
             self._frame_label_var = None
+            self._export_event = threading.Event()
+            self._recording = False
+            self._rec_label_var = None
 
         def start(self) -> None:
             def _run() -> None:
@@ -718,6 +737,11 @@ def main() -> None:
                 frame_label = ttk.Label(root, textvariable=self._frame_label_var, anchor="w")
                 frame_label.pack(fill="x", padx=8, pady=(0, 6))
 
+                # Recording status display
+                self._rec_label_var = tk.StringVar(value="")
+                rec_label = ttk.Label(root, textvariable=self._rec_label_var, anchor="w")
+                rec_label.pack(fill="x", padx=8, pady=(0, 6))
+
                 def _tick_update_frame_label() -> None:
                     with self._lock:
                         idx = int(self._frame_idx_shared)
@@ -729,6 +753,19 @@ def main() -> None:
                         pass
                     try:
                         root.after(100, _tick_update_frame_label)
+                    except Exception:
+                        pass
+
+                def _tick_update_recording_label() -> None:
+                    with self._lock:
+                        rec = bool(self._recording)
+                    text = "Recording in progress..." if rec else ""
+                    try:
+                        self._rec_label_var.set(text)
+                    except Exception:
+                        pass
+                    try:
+                        root.after(100, _tick_update_recording_label)
                     except Exception:
                         pass
 
@@ -766,9 +803,18 @@ def main() -> None:
                 play_pause_btn.pack(side="left", expand=True, fill="x", padx=(0, 4))
                 reset_btn = ttk.Button(controls, text="Reset", command=_request_reset)
                 reset_btn.pack(side="left", expand=True, fill="x", padx=(4, 0))
+                # Export button (signals main loop to bake/export animation)
+                def _request_export() -> None:
+                    try:
+                        self._export_event.set()
+                    except Exception:
+                        pass
+                export_btn = ttk.Button(controls, text="Export Animation", command=_request_export)
+                export_btn.pack(side="left", expand=True, fill="x", padx=(8, 0))
 
                 # Start periodic UI updates
                 _tick_update_frame_label()
+                _tick_update_recording_label()
 
                 self._ready.set()
                 root.mainloop()
@@ -793,6 +839,28 @@ def main() -> None:
         def set_frame_index(self, idx: int) -> None:
             with self._lock:
                 self._frame_idx_shared = int(max(0, idx))
+
+        # Export trigger flag
+        _export_event: threading.Event = field(default_factory=threading.Event)  # type: ignore[assignment]
+
+        def consume_export(self) -> bool:
+            try:
+                if getattr(self, "_export_event", None) is None:
+                    self._export_event = threading.Event()
+                if self._export_event.is_set():
+                    self._export_event.clear()
+                    return True
+            except Exception:
+                pass
+            return False
+
+        def set_recording(self, flag: bool) -> None:
+            with self._lock:
+                self._recording = bool(flag)
+
+        def set_paused(self, paused: bool) -> None:
+            with self._lock:
+                self._paused = bool(paused)
 
     # Base scale from computed scale or manual override; slider controls absolute value
     base_scale = float(BVH_SCALE) if BVH_SCALE is not None else (float(scale_used) if scale_used is not None else 1.0)
@@ -864,6 +932,252 @@ def main() -> None:
         start_frame_clamped = int(min(max(0, START_AT_FRAME), max(0, num_frames - 1)))
         anim_t = float(start_frame_clamped) * float(frame_time)
 
+        def _export_animation(live_scale: float) -> str:
+            """Bake the full BVH sequence into JSON using main-proc-anim schema.
+
+            Returns the output file path.
+            """
+            # Build an offline configuration starting from current configuration/data
+            offline_cfg = mink.Configuration(model)
+            offline_cfg.data.qpos[:] = configuration.data.qpos[:]
+            mujoco.mj_forward(offline_cfg.model, offline_cfg.data)
+
+            # Initialize task targets from offline configuration
+            posture_task.set_target_from_configuration(offline_cfg)
+            pelvis_orientation_task.set_target_from_configuration(offline_cfg)
+            pelvis_position_task.set_target_from_configuration(offline_cfg)
+            torso_orientation_task.set_target_from_configuration(offline_cfg)
+            left_foot_orientation_task.set_target_from_configuration(offline_cfg)
+            right_foot_orientation_task.set_target_from_configuration(offline_cfg)
+            left_shoulder_task.set_target_from_configuration(offline_cfg)
+            right_shoulder_task.set_target_from_configuration(offline_cfg)
+            left_elbow_task.set_target_from_configuration(offline_cfg)
+            right_elbow_task.set_target_from_configuration(offline_cfg)
+            left_knee_task.set_target_from_configuration(offline_cfg)
+            right_knee_task.set_target_from_configuration(offline_cfg)
+
+            d_off = offline_cfg.data
+
+            # Compute anchor using current pelvis XY and frame0 points
+            pelvis_bid_local = mujoco.mj_name2id(offline_cfg.model, mujoco.mjtObj.mjOBJ_BODY, "pelvis")
+            pelvis_xy_now = np.array(d_off.xpos[pelvis_bid_local][0:2], dtype=np.float64) if pelvis_bid_local >= 0 else np.zeros(2)
+            f0_pts_us, _, _, _ = compute_bvh_frame_world_poses(bvh_root, bvh_motion, 0)
+            f0_pts_us = (ROT_BVH_TO_G1 @ f0_pts_us.T).T
+            local_anchor = _compute_anchor_for_targets(live_scale, f0_pts_us, pelvis_xy_now, 0.0)
+
+            # Site metadata
+            site_count = int(offline_cfg.model.nsite)
+            site_names: List[str] = []
+            for sid in range(site_count):
+                nm = mujoco.mj_id2name(offline_cfg.model, mujoco.mjtObj.mjOBJ_SITE, sid)
+                site_names.append(str(nm) if nm is not None else f"site_{sid}")
+
+            # Contact detection site ids
+            def _site_id(m: mujoco.MjModel, name: str) -> int:
+                return int(mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_SITE, name))
+
+            site_id_FL = _site_id(offline_cfg.model, "left_palm")
+            site_id_FR = _site_id(offline_cfg.model, "right_palm")
+            site_id_RL = _site_id(offline_cfg.model, "left_foot")
+            site_id_RR = _site_id(offline_cfg.model, "right_foot")
+            contact_threshold_m = 0.01
+
+            frames: List[List[float]] = []
+            vel_frames: List[List[float]] = []
+            site_positions_per_frame: List[List[List[float]]] = []
+
+            local_solver = SOLVER
+            dt = float(frame_time)
+            total_steps = int(num_frames)
+
+            for k in range(total_steps):
+                f_idx = int(k)
+                frame_pts_us, frame_rots_us, _, _ = compute_bvh_frame_world_poses(bvh_root, bvh_motion, f_idx)
+                frame_pts_us = (ROT_BVH_TO_G1 @ frame_pts_us.T).T
+                frame_rots_g1 = ROT_BVH_TO_G1 @ frame_rots_us @ ROT_BVH_TO_G1.T
+                frame_pts_scaled = frame_pts_us * float(live_scale)
+                bvh_world = frame_pts_scaled + local_anchor
+
+                # Drive mocap targets
+                if CLAMP_HANDS_AND_FEET_TO_FLOOR:
+                    d_off.mocap_pos[right_palm_mid][0:3] = _clamp_floor_z(bvh_world[right_hand_idx], FLOOR_Z)
+                    d_off.mocap_pos[left_palm_mid][0:3] = _clamp_floor_z(bvh_world[left_hand_idx], FLOOR_Z)
+                    d_off.mocap_pos[left_foot_mid][0:3] = _clamp_floor_z(bvh_world[left_foot_idx], FLOOR_Z)
+                    d_off.mocap_pos[right_foot_mid][0:3] = _clamp_floor_z(bvh_world[right_foot_idx], FLOOR_Z)
+                else:
+                    d_off.mocap_pos[right_palm_mid][0:3] = bvh_world[right_hand_idx]
+                    d_off.mocap_pos[left_palm_mid][0:3] = bvh_world[left_hand_idx]
+                    d_off.mocap_pos[left_foot_mid][0:3] = bvh_world[left_foot_idx]
+                    d_off.mocap_pos[right_foot_mid][0:3] = bvh_world[right_foot_idx]
+                d_off.mocap_quat[left_foot_mid][0:4] = _rotmat_to_quat_wxyz(frame_rots_g1[left_foot_idx])
+                d_off.mocap_quat[right_foot_mid][0:4] = _rotmat_to_quat_wxyz(frame_rots_g1[right_foot_idx])
+                d_off.mocap_pos[pelvis_mid][0:3] = bvh_world[pelvis_idx]
+                d_off.mocap_quat[pelvis_mid][0:4] = _rotmat_to_quat_wxyz(frame_rots_g1[pelvis_idx])
+                d_off.mocap_pos[left_shoulder_mid][0:3] = bvh_world[left_shoulder_idx]
+                d_off.mocap_quat[left_shoulder_mid][0:4] = _rotmat_to_quat_wxyz(frame_rots_g1[left_shoulder_idx])
+                d_off.mocap_pos[right_shoulder_mid][0:3] = bvh_world[right_shoulder_idx]
+                d_off.mocap_quat[right_shoulder_mid][0:4] = _rotmat_to_quat_wxyz(frame_rots_g1[right_shoulder_idx])
+                d_off.mocap_pos[left_elbow_mid][0:3] = bvh_world[left_elbow_idx]
+                d_off.mocap_quat[left_elbow_mid][0:4] = _rotmat_to_quat_wxyz(frame_rots_g1[left_elbow_idx])
+                d_off.mocap_pos[right_elbow_mid][0:3] = bvh_world[right_elbow_idx]
+                d_off.mocap_quat[right_elbow_mid][0:4] = _rotmat_to_quat_wxyz(frame_rots_g1[right_elbow_idx])
+                d_off.mocap_pos[left_knee_mid][0:3] = bvh_world[left_knee_idx]
+                d_off.mocap_quat[left_knee_mid][0:4] = _rotmat_to_quat_wxyz(frame_rots_g1[left_knee_idx])
+                d_off.mocap_pos[right_knee_mid][0:3] = bvh_world[right_knee_idx]
+                d_off.mocap_quat[right_knee_mid][0:4] = _rotmat_to_quat_wxyz(frame_rots_g1[right_knee_idx])
+
+                # Update IK targets and solve
+
+                right_hand_task.set_target(mink.SE3.from_mocap_id(d_off, right_palm_mid))
+                left_hand_task.set_target(mink.SE3.from_mocap_id(d_off, left_palm_mid))
+                left_foot_task.set_target(mink.SE3.from_mocap_id(d_off, left_foot_mid))
+                right_foot_task.set_target(mink.SE3.from_mocap_id(d_off, right_foot_mid))
+                left_shoulder_task.set_target(mink.SE3.from_mocap_id(d_off, left_shoulder_mid))
+                right_shoulder_task.set_target(mink.SE3.from_mocap_id(d_off, right_shoulder_mid))
+                left_elbow_task.set_target(mink.SE3.from_mocap_id(d_off, left_elbow_mid))
+                right_elbow_task.set_target(mink.SE3.from_mocap_id(d_off, right_elbow_mid))
+                left_knee_task.set_target(mink.SE3.from_mocap_id(d_off, left_knee_mid))
+                right_knee_task.set_target(mink.SE3.from_mocap_id(d_off, right_knee_mid))
+
+                # Ensure sensor positions are up-to-date for collision avoidance
+                mujoco.mj_fwdPosition(offline_cfg.model, d_off)
+                mujoco.mj_sensorPos(offline_cfg.model, d_off)
+                vel_local = mink.solve_ik(offline_cfg, tasks, dt, local_solver, 1e-1, limits=limits)
+                offline_cfg.integrate_inplace(vel_local, dt)
+
+                frames.append([float(x) for x in d_off.qpos])
+                vel_frames.append([float(x) for x in vel_local])
+
+                # Record site positions
+                site_xyz = []
+                for sid in range(site_count):
+                    site_xyz.append([
+                        float(d_off.site_xpos[sid][0]),
+                        float(d_off.site_xpos[sid][1]),
+                        float(d_off.site_xpos[sid][2]),
+                    ])
+                site_positions_per_frame.append(site_xyz)
+
+            # Recenter XY so the initial base XY becomes 0 for all frames
+            free_qpos_addr = None
+            for j in range(offline_cfg.model.njnt):
+                if int(offline_cfg.model.jnt_type[j]) == 0:
+                    free_qpos_addr = int(offline_cfg.model.jnt_qposadr[j])
+                    break
+            if free_qpos_addr is not None and len(frames) > 0:
+                x0 = float(frames[0][free_qpos_addr + 0])
+                y0 = float(frames[0][free_qpos_addr + 1])
+                if x0 != 0.0 or y0 != 0.0:
+                    for frame_vals in frames:
+                        frame_vals[free_qpos_addr + 0] = float(frame_vals[free_qpos_addr + 0]) - x0
+                        frame_vals[free_qpos_addr + 1] = float(frame_vals[free_qpos_addr + 1]) - y0
+                    for site_frame in site_positions_per_frame:
+                        for s in site_frame:
+                            s[0] = float(s[0]) - x0
+                            s[1] = float(s[1]) - y0
+
+            # Build metadata similar to main-proc-anim.py
+            base_meta = None
+            free_qpos_addr2 = None
+            for j in range(model.njnt):
+                if int(model.jnt_type[j]) == 0:
+                    free_qpos_addr2 = int(model.jnt_qposadr[j])
+                    break
+            if free_qpos_addr2 is not None:
+                base_meta = {
+                    "pos_indices": [free_qpos_addr2 + i for i in range(3)],
+                    "quat_indices": [free_qpos_addr2 + 3 + i for i in range(4)],
+                }
+
+            joints_meta = []
+            qpos_labels = [f"qpos[{i}]" for i in range(model.nq)]
+
+            def _set_label(i: int, name: str) -> None:
+                if 0 <= i < len(qpos_labels):
+                    qpos_labels[i] = name
+
+            for j in range(model.njnt):
+                jtype = int(model.jnt_type[j])
+                qadr = int(model.jnt_qposadr[j])
+                name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, j) or f"joint_{j}"
+                if jtype == 0:
+                    jtypestr = "free"
+                    qdim = 7
+                elif jtype == 1:
+                    jtypestr = "ball"
+                    qdim = 4
+                    _set_label(qadr + 0, f"ball:{name}:w")
+                    _set_label(qadr + 1, f"ball:{name}:x")
+                    _set_label(qadr + 2, f"ball:{name}:y")
+                    _set_label(qadr + 3, f"ball:{name}:z")
+                elif jtype == 2:
+                    jtypestr = "slide"
+                    qdim = 1
+                    _set_label(qadr + 0, f"joint:{name}")
+                else:
+                    jtypestr = "hinge"
+                    qdim = 1
+                    _set_label(qadr + 0, f"joint:{name}")
+                joints_meta.append({
+                    "name": str(name),
+                    "type": jtypestr,
+                    "qposadr": int(qadr),
+                    "qposdim": int(qdim),
+                })
+
+            fps = 1.0 / float(dt)
+            serial = {
+                "schema": "gait_animation.v1",
+                "model_xml": str(xml_path),
+                "dt": float(dt),
+                "fps": float(fps),
+                "nsite": int(model.nsite),
+                "nq": int(model.nq),
+                "nv": int(model.nv),
+                "frames": frames,
+                "vel_frames": vel_frames,
+                "site_positions": site_positions_per_frame,
+                "contact_flags": [
+                    [
+                        1 if float(sp[site_id_FL][2]) <= contact_threshold_m else 0,
+                        1 if float(sp[site_id_FR][2]) <= contact_threshold_m else 0,
+                        1 if float(sp[site_id_RL][2]) <= contact_threshold_m else 0,
+                        1 if float(sp[site_id_RR][2]) <= contact_threshold_m else 0,
+                    ] for sp in site_positions_per_frame
+                ],
+                "timestamp": datetime.now().isoformat(),
+                "metadata": {
+                    "animation_type": "bvh_drive",
+                    "base": base_meta,
+                    "joints": joints_meta,
+                    "qpos_labels": qpos_labels,
+                    "sites": {
+                        "names": site_names,
+                        "indices": list(range(len(site_names))),
+                        "by_name": {name: idx for idx, name in enumerate(site_names)},
+                    },
+                    "contact": {
+                        "order": ["FL", "FR", "RL", "RR"],
+                        "threshold_m": float(contact_threshold_m),
+                    },
+                    "has_root_motion": True,
+                    "bvh": {
+                        "path": str(bvh_path),
+                        "scale": float(live_scale),
+                        "frame_time": float(frame_time),
+                        "num_frames": int(num_frames),
+                    },
+                },
+            }
+
+            out_dir = os.path.join(BASE_DIR, "output")
+            os.makedirs(out_dir, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            out_path = os.path.join(out_dir, f"animation_mocap_{ts}.json")
+            with open(out_path, "w", encoding="utf-8") as f:
+                json.dump(serial, f)
+            return out_path
+
         def _reinit_to_frame0(live_scale: float) -> None:
             nonlocal anim_t, anchor_offset
             # Restart animation time and re-anchor using frame 0 and current pelvis XY
@@ -932,6 +1246,19 @@ def main() -> None:
                     pass
                 scene.ngeom += 1
 
+        # Live recording state
+        recording = False
+        last_recorded_frame = -1
+        rec_frames: List[List[float]] = []
+        rec_vel_frames: List[List[float]] = []
+        rec_site_positions: List[List[List[float]]] = []
+        rec_site_names: List[str] = []
+        site_id_FL = -1
+        site_id_FR = -1
+        site_id_RL = -1
+        site_id_RR = -1
+        contact_threshold_m = 0.01
+
         while viewer.is_running():
             # Live controls: scale change, pause, and reset
             live_scale = float(ui.get())
@@ -940,6 +1267,28 @@ def main() -> None:
                 prev_scale = float(live_scale)
             if ui.consume_reset():
                 _reinit_to_frame0(prev_scale)
+
+            # Handle export trigger
+            if ui.consume_export():
+                if not recording:
+                    ui.set_recording(True)
+                    _reinit_to_frame0(prev_scale)
+                    recording = True
+                    last_recorded_frame = -1
+                    rec_frames = []
+                    rec_vel_frames = []
+                    rec_site_positions = []
+                    # Prepare site metadata for recording
+                    rec_site_names = []
+                    for sid in range(model.nsite):
+                        nm = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_SITE, sid)
+                        rec_site_names.append(str(nm) if nm is not None else f"site_{sid}")
+                    site_id_FL = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "left_palm")
+                    site_id_FR = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "right_palm")
+                    site_id_RL = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "left_foot")
+                    site_id_RR = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "right_foot")
+                else:
+                    pass
 
             if not ui.is_paused():
                 anim_t += rate.dt
@@ -986,6 +1335,7 @@ def main() -> None:
             data.mocap_quat[right_knee_mid][0:4] = _rotmat_to_quat_wxyz(frame_rots_g1[right_knee_idx])
 
             # Update task targets from required mocap bodies
+
             right_hand_task.set_target(mink.SE3.from_mocap_id(data, right_palm_mid))
             left_hand_task.set_target(mink.SE3.from_mocap_id(data, left_palm_mid))
             left_foot_task.set_target(mink.SE3.from_mocap_id(data, left_foot_mid))
@@ -999,9 +1349,157 @@ def main() -> None:
             pelvis_orientation_task.set_target(mink.SE3.from_mocap_id(data, pelvis_mid))
             pelvis_position_task.set_target(mink.SE3.from_mocap_id(data, pelvis_mid))
 
-            # Solve IK step and integrate
+            # Solve IK step and integrate (update sensors first for collision avoidance)
+            mujoco.mj_fwdPosition(model, data)
+            mujoco.mj_sensorPos(model, data)
             vel = mink.solve_ik(configuration, tasks, rate.dt, SOLVER, 1e-1, limits=limits)
             configuration.integrate_inplace(vel, rate.dt)
+
+            # Live recording capture (one full BVH cycle)
+            if recording:
+                if f != last_recorded_frame:
+                    rec_frames.append([float(x) for x in data.qpos])
+                    rec_vel_frames.append([float(x) for x in vel])
+                    site_xyz = []
+                    for sid in range(model.nsite):
+                        site_xyz.append([
+                            float(data.site_xpos[sid][0]),
+                            float(data.site_xpos[sid][1]),
+                            float(data.site_xpos[sid][2]),
+                        ])
+                    rec_site_positions.append(site_xyz)
+                    last_recorded_frame = int(f)
+
+                    if len(rec_frames) >= num_frames:
+                        # Recenter XY so initial base XY becomes 0
+                        free_qpos_addr3 = None
+                        for j in range(model.njnt):
+                            if int(model.jnt_type[j]) == 0:
+                                free_qpos_addr3 = int(model.jnt_qposadr[j])
+                                break
+                        if free_qpos_addr3 is not None and len(rec_frames) > 0:
+                            x0 = float(rec_frames[0][free_qpos_addr3 + 0])
+                            y0 = float(rec_frames[0][free_qpos_addr3 + 1])
+                            if x0 != 0.0 or y0 != 0.0:
+                                for frame_vals in rec_frames:
+                                    frame_vals[free_qpos_addr3 + 0] = float(frame_vals[free_qpos_addr3 + 0]) - x0
+                                    frame_vals[free_qpos_addr3 + 1] = float(frame_vals[free_qpos_addr3 + 1]) - y0
+                                for site_frame in rec_site_positions:
+                                    for s in site_frame:
+                                        s[0] = float(s[0]) - x0
+                                        s[1] = float(s[1]) - y0
+
+                        # Build labels and joint metadata
+                        base_meta2 = None
+                        free_qpos_addr4 = None
+                        for j in range(model.njnt):
+                            if int(model.jnt_type[j]) == 0:
+                                free_qpos_addr4 = int(model.jnt_qposadr[j])
+                                break
+                        if free_qpos_addr4 is not None:
+                            base_meta2 = {
+                                "pos_indices": [free_qpos_addr4 + i for i in range(3)],
+                                "quat_indices": [free_qpos_addr4 + 3 + i for i in range(4)],
+                            }
+
+                        qpos_labels2 = [f"qpos[{i}]" for i in range(model.nq)]
+                        def _set_label2(i: int, name: str) -> None:
+                            if 0 <= i < len(qpos_labels2):
+                                qpos_labels2[i] = name
+                        joints_meta2 = []
+                        for j in range(model.njnt):
+                            jtype = int(model.jnt_type[j])
+                            qadr = int(model.jnt_qposadr[j])
+                            name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, j) or f"joint_{j}"
+                            if jtype == 0:
+                                jtypestr = "free"
+                                qdim = 7
+                            elif jtype == 1:
+                                jtypestr = "ball"
+                                qdim = 4
+                                _set_label2(qadr + 0, f"ball:{name}:w")
+                                _set_label2(qadr + 1, f"ball:{name}:x")
+                                _set_label2(qadr + 2, f"ball:{name}:y")
+                                _set_label2(qadr + 3, f"ball:{name}:z")
+                            elif jtype == 2:
+                                jtypestr = "slide"
+                                qdim = 1
+                                _set_label2(qadr + 0, f"joint:{name}")
+                            else:
+                                jtypestr = "hinge"
+                                qdim = 1
+                                _set_label2(qadr + 0, f"joint:{name}")
+                            joints_meta2.append({
+                                "name": str(name),
+                                "type": jtypestr,
+                                "qposadr": int(qadr),
+                                "qposdim": int(qdim),
+                            })
+
+                        # Build serial and save
+                        fps2 = 1.0 / float(frame_time)
+                        serial2 = {
+                            "schema": "gait_animation.v1",
+                            "model_xml": str(xml_path),
+                            "dt": float(frame_time),
+                            "fps": float(fps2),
+                            "nsite": int(model.nsite),
+                            "nq": int(model.nq),
+                            "nv": int(model.nv),
+                            "frames": rec_frames,
+                            "vel_frames": rec_vel_frames,
+                            "site_positions": rec_site_positions,
+                            "contact_flags": [
+                                [
+                                    1 if float(sp[site_id_FL][2]) <= contact_threshold_m else 0,
+                                    1 if float(sp[site_id_FR][2]) <= contact_threshold_m else 0,
+                                    1 if float(sp[site_id_RL][2]) <= contact_threshold_m else 0,
+                                    1 if float(sp[site_id_RR][2]) <= contact_threshold_m else 0,
+                                ] for sp in rec_site_positions
+                            ],
+                            "timestamp": datetime.now().isoformat(),
+                            "metadata": {
+                                "animation_type": "bvh_drive",
+                                "base": base_meta2,
+                                "joints": joints_meta2,
+                                "qpos_labels": qpos_labels2,
+                                "sites": {
+                                    "names": rec_site_names,
+                                    "indices": list(range(len(rec_site_names))),
+                                    "by_name": {name: idx for idx, name in enumerate(rec_site_names)},
+                                },
+                                "contact": {
+                                    "order": ["FL", "FR", "RL", "RR"],
+                                    "threshold_m": float(contact_threshold_m),
+                                },
+                                "has_root_motion": True,
+                                "bvh": {
+                                    "path": str(bvh_path),
+                                    "scale": float(prev_scale),
+                                    "frame_time": float(frame_time),
+                                    "num_frames": int(num_frames),
+                                },
+                            },
+                        }
+
+                        out_dir = os.path.join(BASE_DIR, "output")
+                        os.makedirs(out_dir, exist_ok=True)
+                        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        out_path = os.path.join(out_dir, f"animation_mocap_{ts}.json")
+                        with open(out_path, "w", encoding="utf-8") as f_out:
+                            json.dump(serial2, f_out)
+
+                        print(f"Exported animation to: {out_path}")
+                        try:
+                            z = shutil.which("zenity")
+                            if z:
+                                subprocess.run([z, "--info", "--title=Export Animation", f"--text=Saved to {os.path.basename(out_path)}"], check=False)
+                        except Exception:
+                            pass
+
+                        ui.set_recording(False)
+                        ui.set_paused(True)
+                        recording = False
 
             mujoco.mj_camlight(model, data)
             viewer.sync()
