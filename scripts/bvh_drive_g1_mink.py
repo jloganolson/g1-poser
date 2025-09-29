@@ -399,6 +399,25 @@ def _rotmat_to_quat_wxyz(R: np.ndarray) -> np.ndarray:
     q /= max(1e-12, float(np.linalg.norm(q)))
     return q
 
+
+def _quat_wxyz_to_rpy(q: np.ndarray) -> Tuple[float, float, float]:
+    """Convert quaternion (w, x, y, z) to roll-pitch-yaw (XYZ intrinsic) in radians."""
+    w = float(q[0]); x = float(q[1]); y = float(q[2]); z = float(q[3])
+    # roll (x-axis rotation)
+    t0 = 2.0 * (w * x + y * z)
+    t1 = 1.0 - 2.0 * (x * x + y * y)
+    roll = math.atan2(t0, t1)
+    # pitch (y-axis rotation)
+    t2 = 2.0 * (w * y - z * x)
+    t2 = 1.0 if t2 > 1.0 else t2
+    t2 = -1.0 if t2 < -1.0 else t2
+    pitch = math.asin(t2)
+    # yaw (z-axis rotation)
+    t3 = 2.0 * (w * z + x * y)
+    t4 = 1.0 - 2.0 * (y * y + z * z)
+    yaw = math.atan2(t3, t4)
+    return roll, pitch, yaw
+
 def _estimate_bvh_arm_height(points: np.ndarray, k: int = 3) -> Optional[float]:
     if points.size == 0:
         return None
@@ -721,6 +740,9 @@ def main() -> None:
             self._export_event = threading.Event()
             self._recording = False
             self._rec_label_var = None
+            self._prev_event = threading.Event()
+            self._next_event = threading.Event()
+            self._export_frame_event = threading.Event()
 
         def start(self) -> None:
             def _run() -> None:
@@ -799,10 +821,26 @@ def main() -> None:
                 def _request_reset() -> None:
                     self._reset_event.set()
 
+                def _request_prev() -> None:
+                    try:
+                        self._prev_event.set()
+                    except Exception:
+                        pass
+
+                def _request_next() -> None:
+                    try:
+                        self._next_event.set()
+                    except Exception:
+                        pass
+
                 play_pause_btn = ttk.Button(controls, textvariable=btn_text, command=_toggle_play_pause)
                 play_pause_btn.pack(side="left", expand=True, fill="x", padx=(0, 4))
                 reset_btn = ttk.Button(controls, text="Reset", command=_request_reset)
                 reset_btn.pack(side="left", expand=True, fill="x", padx=(4, 0))
+                prev_btn = ttk.Button(controls, text="Prev", command=_request_prev)
+                prev_btn.pack(side="left", expand=True, fill="x", padx=(8, 0))
+                next_btn = ttk.Button(controls, text="Next", command=_request_next)
+                next_btn.pack(side="left", expand=True, fill="x", padx=(8, 0))
                 # Export button (signals main loop to bake/export animation)
                 def _request_export() -> None:
                     try:
@@ -811,6 +849,15 @@ def main() -> None:
                         pass
                 export_btn = ttk.Button(controls, text="Export Animation", command=_request_export)
                 export_btn.pack(side="left", expand=True, fill="x", padx=(8, 0))
+
+                # Export current frame pose (single-frame JSON like crawl-pose.json)
+                def _request_export_frame() -> None:
+                    try:
+                        self._export_frame_event.set()
+                    except Exception:
+                        pass
+                export_frame_btn = ttk.Button(controls, text="Export Frame", command=_request_export_frame)
+                export_frame_btn.pack(side="left", expand=True, fill="x", padx=(8, 0))
 
                 # Start periodic UI updates
                 _tick_update_frame_label()
@@ -836,6 +883,18 @@ def main() -> None:
                 return True
             return False
 
+        def consume_prev(self) -> bool:
+            if self._prev_event.is_set():
+                self._prev_event.clear()
+                return True
+            return False
+
+        def consume_next(self) -> bool:
+            if self._next_event.is_set():
+                self._next_event.clear()
+                return True
+            return False
+
         def set_frame_index(self, idx: int) -> None:
             with self._lock:
                 self._frame_idx_shared = int(max(0, idx))
@@ -849,6 +908,17 @@ def main() -> None:
                     self._export_event = threading.Event()
                 if self._export_event.is_set():
                     self._export_event.clear()
+                    return True
+            except Exception:
+                pass
+            return False
+
+        def consume_export_frame(self) -> bool:
+            try:
+                if getattr(self, "_export_frame_event", None) is None:
+                    self._export_frame_event = threading.Event()
+                if self._export_frame_event.is_set():
+                    self._export_frame_event.clear()
                     return True
             except Exception:
                 pass
@@ -1258,6 +1328,71 @@ def main() -> None:
         site_id_RL = -1
         site_id_RR = -1
         contact_threshold_m = 0.01
+        # 200 Hz recording helpers
+        rec_initial_f = -1
+        rec_seen_wrap = False
+        prev_f = -1
+
+        def _export_current_frame_pose() -> str:
+            """Export the current robot pose (single frame) to output/pose_*.json like crawl-pose.json."""
+            # Base RPY from free joint quaternion if present
+            free_qpos_addr = None
+            for j in range(model.njnt):
+                if int(model.jnt_type[j]) == 0:
+                    free_qpos_addr = int(model.jnt_qposadr[j])
+                    break
+            if free_qpos_addr is not None:
+                qw = float(data.qpos[free_qpos_addr + 3])
+                qx = float(data.qpos[free_qpos_addr + 4])
+                qy = float(data.qpos[free_qpos_addr + 5])
+                qz = float(data.qpos[free_qpos_addr + 6])
+                base_rpy = list(_quat_wxyz_to_rpy(np.array([qw, qx, qy, qz], dtype=np.float64)))
+            else:
+                base_rpy = [0.0, 0.0, 0.0]
+
+            # Scalar joints map
+            joints_map: Dict[str, float] = {}
+            for j in range(model.njnt):
+                jtype = int(model.jnt_type[j])
+                if jtype == 0:
+                    continue
+                qadr = int(model.jnt_qposadr[j])
+                name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, j) or f"joint_{j}"
+                if jtype == 2 or jtype == 3 or jtype >= 2:
+                    # slide (2) or hinge (3); for other 1-dim joints treat similarly
+                    joints_map[str(name)] = float(data.qpos[qadr + 0])
+                else:
+                    # Skip non-scalar joints (e.g., ball)
+                    pass
+
+            serial = {
+                "poses": [
+                    {
+                        "base_rpy": [float(base_rpy[0]), float(base_rpy[1]), float(base_rpy[2])],
+                        "joints": joints_map,
+                    }
+                ]
+            }
+            out_dir = os.path.join(BASE_DIR, "output")
+            os.makedirs(out_dir, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            out_path = os.path.join(out_dir, f"pose_{ts}.json")
+            with open(out_path, "w", encoding="utf-8") as f_out:
+                json.dump(serial, f_out, indent=2)
+            print(f"Exported frame pose to: {out_path}")
+            try:
+                z = shutil.which("zenity")
+                if z:
+                    threading.Thread(
+                        target=lambda: subprocess.run(
+                            [z, "--info", "--title=Export Frame", f"--text=Saved to {os.path.basename(out_path)}"],
+                            check=False,
+                        ),
+                        daemon=True,
+                    ).start()
+            except Exception:
+                pass
+            return out_path
 
         while viewer.is_running():
             # Live controls: scale change, pause, and reset
@@ -1267,6 +1402,16 @@ def main() -> None:
                 prev_scale = float(live_scale)
             if ui.consume_reset():
                 _reinit_to_frame0(prev_scale)
+
+            # Compute current frame index before stepping
+            f_curr = int((anim_t / frame_time) % max(1, num_frames))
+            # Handle prev/next frame stepping
+            if ui.consume_prev():
+                nf = (f_curr - 1) % max(1, num_frames)
+                anim_t = float(nf) * float(frame_time)
+            if ui.consume_next():
+                nf = (f_curr + 1) % max(1, num_frames)
+                anim_t = float(nf) * float(frame_time)
 
             # Handle export trigger
             if ui.consume_export():
@@ -1287,8 +1432,16 @@ def main() -> None:
                     site_id_FR = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "right_palm")
                     site_id_RL = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "left_foot")
                     site_id_RR = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "right_foot")
+                    # reset 200 Hz helpers
+                    rec_initial_f = -1
+                    rec_seen_wrap = False
+                    prev_f = -1
                 else:
                     pass
+
+            # Handle export current frame pose trigger
+            if ui.consume_export_frame():
+                _export_current_frame_pose()
 
             if not ui.is_paused():
                 anim_t += rate.dt
@@ -1355,151 +1508,165 @@ def main() -> None:
             vel = mink.solve_ik(configuration, tasks, rate.dt, SOLVER, 1e-1, limits=limits)
             configuration.integrate_inplace(vel, rate.dt)
 
-            # Live recording capture (one full BVH cycle)
+            # Live recording capture at 200 Hz for exactly one BVH cycle
             if recording:
-                if f != last_recorded_frame:
-                    rec_frames.append([float(x) for x in data.qpos])
-                    rec_vel_frames.append([float(x) for x in vel])
-                    site_xyz = []
-                    for sid in range(model.nsite):
-                        site_xyz.append([
-                            float(data.site_xpos[sid][0]),
-                            float(data.site_xpos[sid][1]),
-                            float(data.site_xpos[sid][2]),
-                        ])
-                    rec_site_positions.append(site_xyz)
-                    last_recorded_frame = int(f)
+                # Initialize initial frame on first tick after start
+                if rec_initial_f == -1:
+                    rec_initial_f = int(f)
+                # Detect wrap (e.g., N-1 -> 0)
+                if prev_f != -1 and int(f) < int(prev_f):
+                    rec_seen_wrap = True
 
-                    if len(rec_frames) >= num_frames:
-                        # Recenter XY so initial base XY becomes 0
-                        free_qpos_addr3 = None
-                        for j in range(model.njnt):
-                            if int(model.jnt_type[j]) == 0:
-                                free_qpos_addr3 = int(model.jnt_qposadr[j])
-                                break
-                        if free_qpos_addr3 is not None and len(rec_frames) > 0:
-                            x0 = float(rec_frames[0][free_qpos_addr3 + 0])
-                            y0 = float(rec_frames[0][free_qpos_addr3 + 1])
-                            if x0 != 0.0 or y0 != 0.0:
-                                for frame_vals in rec_frames:
-                                    frame_vals[free_qpos_addr3 + 0] = float(frame_vals[free_qpos_addr3 + 0]) - x0
-                                    frame_vals[free_qpos_addr3 + 1] = float(frame_vals[free_qpos_addr3 + 1]) - y0
-                                for site_frame in rec_site_positions:
-                                    for s in site_frame:
-                                        s[0] = float(s[0]) - x0
-                                        s[1] = float(s[1]) - y0
+                # Append current integrated state every tick (200 Hz)
+                rec_frames.append([float(x) for x in data.qpos])
+                rec_vel_frames.append([float(x) for x in vel])
+                site_xyz = []
+                for sid in range(model.nsite):
+                    site_xyz.append([
+                        float(data.site_xpos[sid][0]),
+                        float(data.site_xpos[sid][1]),
+                        float(data.site_xpos[sid][2]),
+                    ])
+                rec_site_positions.append(site_xyz)
 
-                        # Build labels and joint metadata
-                        base_meta2 = None
-                        free_qpos_addr4 = None
-                        for j in range(model.njnt):
-                            if int(model.jnt_type[j]) == 0:
-                                free_qpos_addr4 = int(model.jnt_qposadr[j])
-                                break
-                        if free_qpos_addr4 is not None:
-                            base_meta2 = {
-                                "pos_indices": [free_qpos_addr4 + i for i in range(3)],
-                                "quat_indices": [free_qpos_addr4 + 3 + i for i in range(4)],
-                            }
+                # If we've wrapped and returned to initial frame index, stop and write
+                if rec_seen_wrap and int(f) == int(rec_initial_f):
+                    # Recenter XY so initial base XY becomes 0
+                    free_qpos_addr3 = None
+                    for j in range(model.njnt):
+                        if int(model.jnt_type[j]) == 0:
+                            free_qpos_addr3 = int(model.jnt_qposadr[j])
+                            break
+                    if free_qpos_addr3 is not None and len(rec_frames) > 0:
+                        x0 = float(rec_frames[0][free_qpos_addr3 + 0])
+                        y0 = float(rec_frames[0][free_qpos_addr3 + 1])
+                        if x0 != 0.0 or y0 != 0.0:
+                            for frame_vals in rec_frames:
+                                frame_vals[free_qpos_addr3 + 0] = float(frame_vals[free_qpos_addr3 + 0]) - x0
+                                frame_vals[free_qpos_addr3 + 1] = float(frame_vals[free_qpos_addr3 + 1]) - y0
+                            for site_frame in rec_site_positions:
+                                for s in site_frame:
+                                    s[0] = float(s[0]) - x0
+                                    s[1] = float(s[1]) - y0
 
-                        qpos_labels2 = [f"qpos[{i}]" for i in range(model.nq)]
-                        def _set_label2(i: int, name: str) -> None:
-                            if 0 <= i < len(qpos_labels2):
-                                qpos_labels2[i] = name
-                        joints_meta2 = []
-                        for j in range(model.njnt):
-                            jtype = int(model.jnt_type[j])
-                            qadr = int(model.jnt_qposadr[j])
-                            name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, j) or f"joint_{j}"
-                            if jtype == 0:
-                                jtypestr = "free"
-                                qdim = 7
-                            elif jtype == 1:
-                                jtypestr = "ball"
-                                qdim = 4
-                                _set_label2(qadr + 0, f"ball:{name}:w")
-                                _set_label2(qadr + 1, f"ball:{name}:x")
-                                _set_label2(qadr + 2, f"ball:{name}:y")
-                                _set_label2(qadr + 3, f"ball:{name}:z")
-                            elif jtype == 2:
-                                jtypestr = "slide"
-                                qdim = 1
-                                _set_label2(qadr + 0, f"joint:{name}")
-                            else:
-                                jtypestr = "hinge"
-                                qdim = 1
-                                _set_label2(qadr + 0, f"joint:{name}")
-                            joints_meta2.append({
-                                "name": str(name),
-                                "type": jtypestr,
-                                "qposadr": int(qadr),
-                                "qposdim": int(qdim),
-                            })
-
-                        # Build serial and save
-                        fps2 = 1.0 / float(frame_time)
-                        serial2 = {
-                            "schema": "gait_animation.v1",
-                            "model_xml": str(xml_path),
-                            "dt": float(frame_time),
-                            "fps": float(fps2),
-                            "nsite": int(model.nsite),
-                            "nq": int(model.nq),
-                            "nv": int(model.nv),
-                            "frames": rec_frames,
-                            "vel_frames": rec_vel_frames,
-                            "site_positions": rec_site_positions,
-                            "contact_flags": [
-                                [
-                                    1 if float(sp[site_id_FL][2]) <= contact_threshold_m else 0,
-                                    1 if float(sp[site_id_FR][2]) <= contact_threshold_m else 0,
-                                    1 if float(sp[site_id_RL][2]) <= contact_threshold_m else 0,
-                                    1 if float(sp[site_id_RR][2]) <= contact_threshold_m else 0,
-                                ] for sp in rec_site_positions
-                            ],
-                            "timestamp": datetime.now().isoformat(),
-                            "metadata": {
-                                "animation_type": "bvh_drive",
-                                "base": base_meta2,
-                                "joints": joints_meta2,
-                                "qpos_labels": qpos_labels2,
-                                "sites": {
-                                    "names": rec_site_names,
-                                    "indices": list(range(len(rec_site_names))),
-                                    "by_name": {name: idx for idx, name in enumerate(rec_site_names)},
-                                },
-                                "contact": {
-                                    "order": ["FL", "FR", "RL", "RR"],
-                                    "threshold_m": float(contact_threshold_m),
-                                },
-                                "has_root_motion": True,
-                                "bvh": {
-                                    "path": str(bvh_path),
-                                    "scale": float(prev_scale),
-                                    "frame_time": float(frame_time),
-                                    "num_frames": int(num_frames),
-                                },
-                            },
+                    # Build labels and joint metadata
+                    base_meta2 = None
+                    free_qpos_addr4 = None
+                    for j in range(model.njnt):
+                        if int(model.jnt_type[j]) == 0:
+                            free_qpos_addr4 = int(model.jnt_qposadr[j])
+                            break
+                    if free_qpos_addr4 is not None:
+                        base_meta2 = {
+                            "pos_indices": [free_qpos_addr4 + i for i in range(3)],
+                            "quat_indices": [free_qpos_addr4 + 3 + i for i in range(4)],
                         }
 
-                        out_dir = os.path.join(BASE_DIR, "output")
-                        os.makedirs(out_dir, exist_ok=True)
-                        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                        out_path = os.path.join(out_dir, f"animation_mocap_{ts}.json")
-                        with open(out_path, "w", encoding="utf-8") as f_out:
-                            json.dump(serial2, f_out)
+                    qpos_labels2 = [f"qpos[{i}]" for i in range(model.nq)]
+                    def _set_label2(i: int, name: str) -> None:
+                        if 0 <= i < len(qpos_labels2):
+                            qpos_labels2[i] = name
+                    joints_meta2 = []
+                    for j in range(model.njnt):
+                        jtype = int(model.jnt_type[j])
+                        qadr = int(model.jnt_qposadr[j])
+                        name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, j) or f"joint_{j}"
+                        if jtype == 0:
+                            jtypestr = "free"; qdim = 7
+                        elif jtype == 1:
+                            jtypestr = "ball"; qdim = 4
+                            _set_label2(qadr + 0, f"ball:{name}:w")
+                            _set_label2(qadr + 1, f"ball:{name}:x")
+                            _set_label2(qadr + 2, f"ball:{name}:y")
+                            _set_label2(qadr + 3, f"ball:{name}:z")
+                        elif jtype == 2:
+                            jtypestr = "slide"; qdim = 1
+                            _set_label2(qadr + 0, f"joint:{name}")
+                        else:
+                            jtypestr = "hinge"; qdim = 1
+                            _set_label2(qadr + 0, f"joint:{name}")
+                        joints_meta2.append({
+                            "name": str(name),
+                            "type": jtypestr,
+                            "qposadr": int(qadr),
+                            "qposdim": int(qdim),
+                        })
 
-                        print(f"Exported animation to: {out_path}")
-                        try:
-                            z = shutil.which("zenity")
-                            if z:
-                                subprocess.run([z, "--info", "--title=Export Animation", f"--text=Saved to {os.path.basename(out_path)}"], check=False)
-                        except Exception:
-                            pass
+                    # Build serial and save (dt = rate.dt for 200 Hz capture)
+                    fps2 = 1.0 / float(rate.dt)
+                    serial2 = {
+                        "schema": "gait_animation.v1",
+                        "model_xml": str(xml_path),
+                        "dt": float(rate.dt),
+                        "fps": float(fps2),
+                        "nsite": int(model.nsite),
+                        "nq": int(model.nq),
+                        "nv": int(model.nv),
+                        "frames": rec_frames,
+                        "vel_frames": rec_vel_frames,
+                        "site_positions": rec_site_positions,
+                        "contact_flags": [
+                            [
+                                1 if float(sp[site_id_FL][2]) <= contact_threshold_m else 0,
+                                1 if float(sp[site_id_FR][2]) <= contact_threshold_m else 0,
+                                1 if float(sp[site_id_RL][2]) <= contact_threshold_m else 0,
+                                1 if float(sp[site_id_RR][2]) <= contact_threshold_m else 0,
+                            ] for sp in rec_site_positions
+                        ],
+                        "timestamp": datetime.now().isoformat(),
+                        "metadata": {
+                            "animation_type": "bvh_drive",
+                            "base": base_meta2,
+                            "joints": joints_meta2,
+                            "qpos_labels": qpos_labels2,
+                            "sites": {
+                                "names": rec_site_names,
+                                "indices": list(range(len(rec_site_names))),
+                                "by_name": {name: idx for idx, name in enumerate(rec_site_names)},
+                            },
+                            "contact": {
+                                "order": ["FL", "FR", "RL", "RR"],
+                                "threshold_m": float(contact_threshold_m),
+                            },
+                            "has_root_motion": True,
+                            "capture_hz": float(fps2),
+                            "bvh": {
+                                "path": str(bvh_path),
+                                "scale": float(prev_scale),
+                                "frame_time": float(frame_time),
+                                "num_frames": int(num_frames),
+                            },
+                        },
+                    }
 
-                        ui.set_recording(False)
-                        ui.set_paused(True)
-                        recording = False
+                    out_dir = os.path.join(BASE_DIR, "output")
+                    os.makedirs(out_dir, exist_ok=True)
+                    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    out_path = os.path.join(out_dir, f"animation_mocap_{ts}.json")
+                    with open(out_path, "w", encoding="utf-8") as f_out:
+                        json.dump(serial2, f_out)
+
+                    print(f"Exported animation to: {out_path}")
+                    try:
+                        z = shutil.which("zenity")
+                        if z:
+                            # Launch confirmation non-blocking so main loop continues
+                            threading.Thread(
+                                target=lambda: subprocess.run(
+                                    [z, "--info", "--title=Export Animation", f"--text=Saved to {os.path.basename(out_path)}"],
+                                    check=False,
+                                ),
+                                daemon=True,
+                            ).start()
+                    except Exception:
+                        pass
+
+                    ui.set_recording(False)
+                    ui.set_paused(False)
+                    recording = False
+
+            # Track previous BVH frame each tick
+            prev_f = int(f)
 
             mujoco.mj_camlight(model, data)
             viewer.sync()
