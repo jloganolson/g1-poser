@@ -52,6 +52,10 @@ WINGSPAN_SCALE = False
 # Viewer overlay
 LINE_RADIUS = 0.006
 
+# CoM visualization
+COM_SPHERE_RADIUS = 0.05
+COM_RGBA = [1.0, 0.3, 0.3, 1.0]
+
 # IK safety clamps
 FLOOR_Z = 0.0
 CLAMP_HANDS_AND_FEET_TO_FLOOR = True
@@ -1303,8 +1307,10 @@ def main() -> None:
 
         def _draw_bvh_overlay(scene: mujoco.MJVSCENE, pts: np.ndarray, edges: List[Tuple[int, int]], rgba: np.ndarray) -> None:
             scene.ngeom = 0
+            # Reserve one slot for CoM marker
+            max_for_edges = int(scene.maxgeom) - 1 if int(scene.maxgeom) > 0 else 0
             for i, j in edges:
-                if int(scene.ngeom) >= int(scene.maxgeom):
+                if int(scene.ngeom) >= int(max_for_edges):
                     break
                 a3 = np.asarray(pts[i], dtype=np.float64)
                 b3 = np.asarray(pts[j], dtype=np.float64)
@@ -1315,6 +1321,20 @@ def main() -> None:
                 except Exception:
                     pass
                 scene.ngeom += 1
+
+        def _compute_com(model: mujoco.MjModel, data: mujoco.MjData) -> np.ndarray:
+            """Return whole-model Center of Mass in world coordinates using subtree_com[0]."""
+            return np.array(data.subtree_com[0], dtype=np.float64)
+
+        def _draw_com(scene: mujoco.MJVSCENE, pos: np.ndarray, radius: float, rgba: np.ndarray) -> None:
+            if int(scene.ngeom) >= int(scene.maxgeom):
+                return
+            g = scene.geoms[int(scene.ngeom)]
+            size = np.array([float(radius), 0.0, 0.0], dtype=np.float64)
+            p = np.asarray(pos, dtype=np.float64)
+            mat = np.eye(3, dtype=np.float64).reshape(9)
+            mujoco.mjv_initGeom(g, mujoco.mjtGeom.mjGEOM_SPHERE, size, p, mat, rgba.astype(np.float32))
+            scene.ngeom += 1
 
         # Live recording state
         recording = False
@@ -1507,6 +1527,17 @@ def main() -> None:
             mujoco.mj_sensorPos(model, data)
             vel = mink.solve_ik(configuration, tasks, rate.dt, SOLVER, 1e-1, limits=limits)
             configuration.integrate_inplace(vel, rate.dt)
+
+            # Refresh derived positions and append CoM marker to the user scene
+            mujoco.mj_fwdPosition(model, data)
+            # Use global CoM from subtree_com[0] (whole model)
+            com_w = _compute_com(model, data)
+            _draw_com(
+                viewer.user_scn,
+                com_w,
+                float(COM_SPHERE_RADIUS),
+                np.array(COM_RGBA, dtype=np.float32),
+            )
 
             # Live recording capture at 200 Hz for exactly one BVH cycle
             if recording:
