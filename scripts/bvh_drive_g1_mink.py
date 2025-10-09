@@ -1362,12 +1362,19 @@ def main() -> None:
                     free_qpos_addr = int(model.jnt_qposadr[j])
                     break
             if free_qpos_addr is not None:
+                # Base position (x, y, z)
+                base_pos = [
+                    float(data.qpos[free_qpos_addr + 0]),
+                    float(data.qpos[free_qpos_addr + 1]),
+                    float(data.qpos[free_qpos_addr + 2]),
+                ]
                 qw = float(data.qpos[free_qpos_addr + 3])
                 qx = float(data.qpos[free_qpos_addr + 4])
                 qy = float(data.qpos[free_qpos_addr + 5])
                 qz = float(data.qpos[free_qpos_addr + 6])
                 base_rpy = list(_quat_wxyz_to_rpy(np.array([qw, qx, qy, qz], dtype=np.float64)))
             else:
+                base_pos = [0.0, 0.0, 0.0]
                 base_rpy = [0.0, 0.0, 0.0]
 
             # Scalar joints map
@@ -1388,6 +1395,7 @@ def main() -> None:
             serial = {
                 "poses": [
                     {
+                        "base_pos": [float(base_pos[0]), float(base_pos[1]), float(base_pos[2])],
                         "base_rpy": [float(base_rpy[0]), float(base_rpy[1]), float(base_rpy[2])],
                         "joints": joints_map,
                     }
